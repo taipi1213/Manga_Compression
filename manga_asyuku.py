@@ -202,7 +202,6 @@ def compress_image_worker(src_path, dst_folder, jpeg_quality, jpeg_progressive, 
                     dst_path = original_dst_path
                     shutil.copy2(src_path, dst_path)
                     return (src_path, dst_path, "圧縮後のサイズが大きかったためスキップ")
-                    return (src_path, dst_path, "圧縮後サイズが大きいためスキップ")
             
             return (src_path, dst_path, None)  # 成功
 
@@ -433,10 +432,6 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         # 処理中画像表示用の変数
         self.current_processing_photo = None
         self.current_processing_path = None
-
-        # 進捗追跡用の変数を追加
-        self.processed_files = []  # 処理済みファイルのリスト
-        self.current_archive = None  # 現在処理中の書籍ファイル（アーカイブ）
 
         # 進捗追跡用の変数を追加
         self.processed_files = []  # 処理済みファイルのリスト
@@ -916,10 +911,6 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         # 既存のラベル
         self.progress_label = tk.Label(self.progress_frame, text="")
         self.progress_label.pack(anchor="w", padx=5)
-        
-        # ボタン用フレーム（右側に配置）
-        button_frame = tk.Frame(resource_frame)
-        button_frame.pack(side=tk.RIGHT, padx=5)
 
         # CPU使用率表示
         self.cpu_label = tk.Label(resource_frame, text="CPU使用率: 0%", fg="#009900")
