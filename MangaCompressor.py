@@ -4020,32 +4020,42 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 self.log(f"[フォルダ] 圧縮率: {reduction:.1f}% ({self.format_size(orig)} → {self.format_size(final)})")
 
     def _apply_auto_replace(self, inpath, out_path):
-        """処理後自動置き換え: out_pathを元ファイルと同じ場所に移動し、元ファイルをバックアップフォルダへ移動する。"""
+        """処理後自動置き換え: 元ファイルをバックアップへ移動した後、out_pathを元の場所に配置する。
+
+        注意: out_pathとinpathが同名の場合、先にout_pathを移動するとinpathが失われるため、
+        必ず「元ファイルのバックアップ → 出力ファイルの配置」の順で実行する。
+        バックアップフォルダ未設定時はデータ保護のため処理を中断する。
+        """
         try:
+            backup_folder = self.original_backup_folder.get()
+            if not backup_folder or not os.path.isdir(backup_folder):
+                self.log_error(
+                    "元ファイル移動先フォルダが未設定または存在しません。自動置き換えを中断しました。",
+                    inpath,
+                )
+                return
+
             original_dir = os.path.dirname(os.path.abspath(inpath))
             dest_file = os.path.join(original_dir, os.path.basename(out_path))
-            
-            # 既存ファイルがあれば上書き
-            if os.path.exists(dest_file):
-                os.remove(dest_file)
-            shutil.move(out_path, dest_file)
+
+            # ステップ1: 元ファイルをバックアップフォルダへ移動（先に実行）
+            dest_backup = os.path.join(backup_folder, os.path.basename(inpath))
+            if os.path.exists(dest_backup):
+                base, ext = os.path.splitext(os.path.basename(inpath))
+                counter = 1
+                while os.path.exists(os.path.join(backup_folder, f"{base}_{counter}{ext}")):
+                    counter += 1
+                dest_backup = os.path.join(backup_folder, f"{base}_{counter}{ext}")
+            shutil.move(inpath, dest_backup)
+            self.log(f"元ファイルを移動: {inpath} → {dest_backup}")
+
+            # ステップ2: 出力ファイルを元の場所に配置
+            # inpathを既に移動済みなので、dest_fileに残っていれば別の既存ファイル
+            if os.path.abspath(out_path) != os.path.abspath(dest_file):
+                if os.path.exists(dest_file):
+                    os.remove(dest_file)
+                shutil.move(out_path, dest_file)
             self.log(f"元の場所に配置: {dest_file}")
-            
-            # 元ファイルをバックアップフォルダへ移動
-            backup_folder = self.original_backup_folder.get()
-            if backup_folder and os.path.isdir(backup_folder):
-                dest_backup = os.path.join(backup_folder, os.path.basename(inpath))
-                # 同名ファイルが既にあれば連番を付ける
-                if os.path.exists(dest_backup):
-                    base, ext = os.path.splitext(os.path.basename(inpath))
-                    counter = 1
-                    while os.path.exists(os.path.join(backup_folder, f"{base}_{counter}{ext}")):
-                        counter += 1
-                    dest_backup = os.path.join(backup_folder, f"{base}_{counter}{ext}")
-                shutil.move(inpath, dest_backup)
-                self.log(f"元ファイルを移動: {inpath} → {dest_backup}")
-            else:
-                self.log_error("元ファイル移動先フォルダが未設定または存在しません", inpath)
         except Exception as e:
             self.log_error(f"自動置き換えエラー: {e}", inpath)
 
