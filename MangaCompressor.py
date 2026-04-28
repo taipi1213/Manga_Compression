@@ -213,8 +213,8 @@ def compress_image_worker(src_path, dst_folder, jpeg_quality, jpeg_progressive, 
             if not os.path.exists(dst_path):
                 shutil.copy2(src_path, dst_path)
                 return (src_path, dst_path, f"エラー発生、元ファイルコピー: {str(e)}")
-        except:
-            pass
+        except Exception as copy_err:
+            logger.exception(f"フォールバックコピーも失敗: {src_path} ({copy_err})")
         return (src_path, None, f"処理エラー: {str(e)}")
 
 def maybe_resize(src_path, resize_mode, resize_width, resize_height, resize_modes):
@@ -222,11 +222,14 @@ def maybe_resize(src_path, resize_mode, resize_width, resize_height, resize_mode
     if resize_mode == resize_modes[0]:
         return src_path
 
+    img = None
+    resized_img = None
     try:
         # 画像を開く
         img = Image.open(src_path)
         w, h = img.size
         new_w, new_h = w, h
+        original_format = img.format
 
         # リサイズモードに応じた処理
         if resize_mode == resize_modes[1] and resize_width > 0:  # 幅優先
@@ -248,23 +251,30 @@ def maybe_resize(src_path, resize_mode, resize_width, resize_height, resize_mode
             return src_path
 
         # リサイズ処理
-        resized_img = img.resize((new_w, new_h), Image.LANCZOS)  # 高速化のためBILINEAR使用
+        resized_img = img.resize((new_w, new_h), Image.LANCZOS)
         temp_path = src_path + "_resized" + os.path.splitext(src_path)[1]
-       
-        # 透過情報を保持
-        if img.mode == 'RGBA':
-            resized_img.save(temp_path, format=img.format)
+
+        # 透過情報を保持（formatがNoneの場合は拡張子から推測される）
+        if img.mode == 'RGBA' and original_format:
+            resized_img.save(temp_path, format=original_format)
         else:
             resized_img.save(temp_path)
-           
-        # リソース解放
-        img.close()
-        resized_img.close()
-       
+
         return temp_path
     except Exception as e:
         logger.exception(f"Error in maybe_resize for {src_path}")
         return src_path
+    finally:
+        if img is not None:
+            try:
+                img.close()
+            except Exception:
+                pass
+        if resized_img is not None:
+            try:
+                resized_img.close()
+            except Exception:
+                pass
 
 # 言語設定
 def load_language():
@@ -4485,8 +4495,8 @@ def main():
         if 'app' in locals() and hasattr(app, 'save_logs_to_file'):
             try:
                 app.save_logs_to_file()
-            except:
-                pass
+            except Exception:
+                logger.exception("起動エラー時のログ保存に失敗")
         messagebox.showerror("Critical Error", f"アプリケーション起動に失敗しました。\n\n{e}")
 
 if __name__ == "__main__":

@@ -20,4 +20,5 @@ log/
 .claude/
 
 # Misc
-[].png
+\[\].png
+*.png
