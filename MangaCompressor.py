@@ -894,16 +894,33 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         scrollbar = tk.Scrollbar(list_subframe)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        self.file_listbox = tk.Listbox(list_subframe, height=6, selectmode=tk.EXTENDED)
-        self.file_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # スクロールバーとリストボックスを連動
-        self.file_listbox.config(yscrollcommand=scrollbar.set)
-        scrollbar.config(command=self.file_listbox.yview)
-        
-        # リストボックスのイベントバインド
-        self.file_listbox.bind("<Delete>", self.on_delete_selection)
-        self.file_listbox.bind("<Button-3>", self.show_listbox_menu)  # 右クリックメニュー
+        # ファイル一覧をTreeviewで表示（名前/状況/圧縮率の3列）
+        self.file_tree = ttk.Treeview(
+            list_subframe, columns=("status", "ratio"), height=8, selectmode="extended"
+        )
+        self.file_tree.heading("#0", text="名前")
+        self.file_tree.heading("status", text="状況")
+        self.file_tree.heading("ratio", text="圧縮率")
+        self.file_tree.column("#0", width=420, anchor="w")
+        self.file_tree.column("status", width=80, anchor="center")
+        self.file_tree.column("ratio", width=80, anchor="e")
+        self.file_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.file_tree.config(yscrollcommand=scrollbar.set)
+        scrollbar.config(command=self.file_tree.yview)
+
+        self.file_tree.bind("<Delete>", self.on_delete_selection)
+        self.file_tree.bind("<Button-3>", self.show_listbox_menu)
+
+        # ステータス色分け
+        self.file_tree.tag_configure("processing", foreground="#1565C0")  # 青
+        self.file_tree.tag_configure("done", foreground="#2E7D32")  # 緑
+        self.file_tree.tag_configure("skipped", foreground="#EF6C00")  # 橙
+        self.file_tree.tag_configure("error", foreground="#C62828")  # 赤
+
+        # path → item id の双方向マップ
+        self._tree_item_by_path = {}
+        self._tree_path_by_item = {}
 
         # プログレスバー
         self.progress_frame = tk.Frame(left_frame)
@@ -1078,31 +1095,127 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         """ドラッグ終了時の処理（簡略化）"""
         pass
 
+    # ---- Treeview 操作ヘルパー ----
+    def _tree_add_top(self, path, is_folder):
+        """トップレベル行を追加。フォルダの場合は内部の書籍を子要素として展開する。"""
+        try:
+            base = os.path.basename(path.rstrip("/\\")) or path
+            display = f"[フォルダ] {base}" if is_folder else base
+            iid = self.file_tree.insert("", "end", text=display, values=("待機", ""))
+            self._tree_item_by_path[path] = iid
+            self._tree_path_by_item[iid] = path
+
+            if is_folder:
+                ARC_EXTS = {".zip", ".cbz", ".rar"}
+                for root, _, files in os.walk(path):
+                    for f in files:
+                        if os.path.splitext(f)[1].lower() in ARC_EXTS:
+                            full = os.path.join(root, f)
+                            rel = os.path.relpath(full, path)
+                            child_iid = self.file_tree.insert(iid, "end", text=rel, values=("待機", ""))
+                            self._tree_item_by_path[full] = child_iid
+                            self._tree_path_by_item[child_iid] = full
+        except Exception as e:
+            logger.exception(f"_tree_add_top error: {e}")
+
+    def update_tree_status(self, path, status, ratio_text=None):
+        """指定パスの行の状況・圧縮率を更新する（UIスレッドから呼ぶこと）。"""
+        iid = self._tree_item_by_path.get(path)
+        if not iid:
+            return
+        try:
+            if not self.file_tree.exists(iid):
+                return
+            current_values = self.file_tree.item(iid, "values")
+            new_status = status if status is not None else (current_values[0] if current_values else "")
+            new_ratio = ratio_text if ratio_text is not None else (current_values[1] if len(current_values) > 1 else "")
+            tag_map = {"処理中": "processing", "完了": "done", "スキップ": "skipped", "エラー": "error"}
+            tag = tag_map.get(new_status, "")
+            self.file_tree.item(iid, values=(new_status, new_ratio), tags=(tag,) if tag else ())
+            # 表示中の行までスクロール
+            self.file_tree.see(iid)
+            # 親フォルダがあれば集約状況を更新
+            parent_iid = self.file_tree.parent(iid)
+            if parent_iid:
+                parent_path = self._tree_path_by_item.get(parent_iid)
+                if parent_path:
+                    self._aggregate_folder_status(parent_path)
+        except Exception as e:
+            logger.exception(f"update_tree_status error: {e}")
+
+    def _aggregate_folder_status(self, folder_path):
+        """フォルダ配下の子要素状況を集約してフォルダ行のステータスを更新する。"""
+        iid = self._tree_item_by_path.get(folder_path)
+        if not iid or not self.file_tree.exists(iid):
+            return
+        children = self.file_tree.get_children(iid)
+        if not children:
+            return
+        statuses = []
+        for c in children:
+            v = self.file_tree.item(c, "values")
+            statuses.append(v[0] if v else "")
+
+        terminal = {"完了", "スキップ", "エラー"}
+        if all(s in terminal for s in statuses):
+            # 全件確定。圧縮率はsize_summaryの集計を使用
+            ratio_text = ""
+            if folder_path in self.size_summary:
+                data = self.size_summary[folder_path]
+                if len(data) >= 3 and not data[2] and data[0] > 0:
+                    ratio = (1 - data[1] / data[0]) * 100
+                    ratio_text = f"{ratio:.1f}%"
+            done_count = sum(1 for s in statuses if s == "完了")
+            label = "完了" if done_count == len(statuses) else f"完了({done_count}/{len(statuses)})"
+            tag = "done" if done_count == len(statuses) else "skipped"
+            self.file_tree.item(iid, values=(label, ratio_text), tags=(tag,))
+        elif any(s == "処理中" for s in statuses):
+            self.file_tree.item(iid, values=("処理中", ""), tags=("processing",))
+
+    def _tree_clear_all(self):
+        """ツリービューを空にする。"""
+        try:
+            for iid in self.file_tree.get_children():
+                self.file_tree.delete(iid)
+        except Exception:
+            pass
+        self._tree_item_by_path.clear()
+        self._tree_path_by_item.clear()
+
+    def _selected_top_paths(self):
+        """選択行のうち、トップレベル(=input_files)に対応するパスのみ返す。"""
+        result = []
+        for iid in self.file_tree.selection():
+            if self.file_tree.parent(iid):
+                continue  # 子要素は無視
+            p = self._tree_path_by_item.get(iid)
+            if p:
+                result.append((iid, p))
+        return result
+
     # ファイル削除関連のメソッド
     def on_delete_selection(self, event):
-        """Deleteキーでリストボックス上の選択項目を削除"""
+        """Deleteキーでツリービュー上の選択項目を削除"""
         if self.processing:
             return
-            
-        selection = self.file_listbox.curselection()
-        if not selection:
+
+        targets = self._selected_top_paths()
+        if not targets:
             return
-            
+
         if messagebox.askyesno(LANG["confirm_delete"], LANG["confirm_delete_msg"]):
-            # 選択項目を逆順に処理（リストボックスのインデックスが変わるのを防ぐため）
-            for index in sorted(selection, reverse=True):
-                # Listboxから表示文字列を取得（[フォルダ]プレフィックスを除く）
-                display_text = self.file_listbox.get(index)
-                if display_text.startswith("[フォルダ] "):
-                    file_path = display_text[len("[フォルダ] "):]
-                else:
-                    file_path = display_text
-                self.file_listbox.delete(index)
-                # 入力ファイルリストからも削除
-                if file_path in self.input_files:
-                    self.input_files.remove(file_path)
-            
-            # ファイル数表示を更新
+            for iid, path in targets:
+                # 子要素のマップも削除
+                for child in self.file_tree.get_children(iid):
+                    cp = self._tree_path_by_item.pop(child, None)
+                    if cp:
+                        self._tree_item_by_path.pop(cp, None)
+                self.file_tree.delete(iid)
+                self._tree_item_by_path.pop(path, None)
+                self._tree_path_by_item.pop(iid, None)
+                if path in self.input_files:
+                    self.input_files.remove(path)
+
             self.update_file_count()
 
     # 以下の新しいメソッドを追加
@@ -1435,7 +1548,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
     # ファイルリストボックスの右クリックメニュー
     def show_listbox_menu(self, event):
-        if not self.file_listbox.curselection():
+        if not self.file_tree.selection():
             return
             
         menu = Menu(self, tearoff=0)
@@ -1453,38 +1566,35 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         """選択されたファイルを削除"""
         if self.processing:
             return
-            
-        selection = self.file_listbox.curselection()
-        if not selection:
+        targets = self._selected_top_paths()
+        if not targets:
             return
-            
+
         if messagebox.askyesno(LANG["confirm_delete"], LANG["confirm_delete_msg"]):
-            # 選択項目を逆順に処理
-            for index in sorted(selection, reverse=True):
-                display_text = self.file_listbox.get(index)
-                if display_text.startswith("[フォルダ] "):
-                    file_path = display_text[len("[フォルダ] "):]
-                else:
-                    file_path = display_text
-                self.file_listbox.delete(index)
-                if file_path in self.input_files:
-                    self.input_files.remove(file_path)
-            
-            # ファイル数表示を更新
+            for iid, path in targets:
+                for child in self.file_tree.get_children(iid):
+                    cp = self._tree_path_by_item.pop(child, None)
+                    if cp:
+                        self._tree_item_by_path.pop(cp, None)
+                self.file_tree.delete(iid)
+                self._tree_item_by_path.pop(path, None)
+                self._tree_path_by_item.pop(iid, None)
+                if path in self.input_files:
+                    self.input_files.remove(path)
             self.update_file_count()
 
     def select_all_files(self):
-        """すべてのファイルを選択"""
-        # ListBoxの全アイテムを選択
-        self.file_listbox.select_set(0, tk.END)
+        """すべてのファイルを選択（トップレベルのみ）"""
+        for iid in self.file_tree.get_children():
+            self.file_tree.selection_add(iid)
 
     def delete_all_files(self):
         """すべてのファイルを削除"""
         if self.processing:
             return
-            
+
         if messagebox.askyesno(LANG["confirm_delete"], LANG["confirm_delete_msg"]):
-            self.file_listbox.delete(0, tk.END)
+            self._tree_clear_all()
             self.input_files.clear()
             self.update_file_count()
 
@@ -2835,13 +2945,13 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             if os.path.isdir(p):
                 if p not in self.input_files:
                     self.input_files.append(p)
-                    self.file_listbox.insert(tk.END, f"[フォルダ] {p}")
+                    self._tree_add_top(p, is_folder=True)
                     added += 1
             else:
                 # 単一ファイルの場合
                 if p not in self.input_files:
                     self.input_files.append(p)
-                    self.file_listbox.insert(tk.END, p)
+                    self._tree_add_top(p, is_folder=False)
                     added += 1
                     
         if added > 0:
@@ -2866,7 +2976,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             for f in files:
                 if f not in self.input_files:
                     self.input_files.append(f)
-                    self.file_listbox.insert(tk.END, f)
+                    self._tree_add_top(f, is_folder=False)
                     added += 1
                     
             if added > 0:
@@ -2880,7 +2990,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         folder = filedialog.askdirectory(title="書籍フォルダを選択")
         if folder and folder not in self.input_files:
             self.input_files.append(folder)
-            self.file_listbox.insert(tk.END, f"[フォルダ] {folder}")
+            self._tree_add_top(folder, is_folder=True)
             self.log(f"フォルダを追加: {folder}")
             self.update_file_count()
 
@@ -3191,7 +3301,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             
             # 実行後、処理済みファイルリストをクリア（この位置に移動）
             self.input_files.clear()
-            self.file_listbox.delete(0, tk.END)
+            self._tree_clear_all()
             self.update_file_count()
            
             # 結果表示（各ファイルのサイズ削減結果）- 中止した場合も表示
@@ -3534,6 +3644,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
     def process_file(self, inpath, output_dir, pause_callback=None, container_root=None):
         # 現在処理中のファイル名を表示
         self.run_on_ui_thread(self.update_current_file_display, inpath)
+        # ツリービューのステータスを「処理中」に更新
+        self.run_on_ui_thread(self.update_tree_status, inpath, "処理中", None)
         
         # 処理開始時に現在の書籍ファイルを設定
         self.current_archive = inpath
@@ -3570,6 +3682,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                     self.log_error("7-Zipがインストールされていないため、RARファイルは処理できません。", inpath)
                     self.log_skip(os.path.basename(inpath), "7-Zip未インストール")
                     self.size_summary[inpath] = (orig_size, 0, True, "7-Zip未インストール")
+                    self.run_on_ui_thread(self.update_tree_status, inpath, "スキップ", "")
                     return
                        
                 try:
@@ -3581,6 +3694,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                         self.log(f"[再処理スキップ] 処理済みマーカーを検出: {os.path.basename(inpath)}")
                         self.log_skip(os.path.basename(inpath), "処理済みマーカー検出（再処理スキップ）", inpath)
                         self.size_summary[inpath] = (orig_size, 0, True, "処理済みマーカー検出")
+                        self.run_on_ui_thread(self.update_tree_status, inpath, "スキップ", "")
                         return
 
                     # 解凍処理が成功したかどうかをチェック
@@ -3659,8 +3773,9 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                     logger.exception(f"Archive processing error for {inpath}")
                     self.log_skip(os.path.basename(inpath), f"アーカイブエラー: {str(e)}", inpath)
                     self.size_summary[inpath] = (orig_size, 0, True, f"エラー: {str(e)}")
+                    self.run_on_ui_thread(self.update_tree_status, inpath, "エラー", "")
                     return
-                    
+
             elif ext in [".jpg", ".jpeg", ".png", ".webp", ".tiff", ".gif", ".bmp"]:
                 try:
                     # 一時停止チェック
@@ -3770,6 +3885,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 self.log(LANG["not_image_or_archive"])
                 self.log_skip(os.path.basename(inpath), "未対応ファイル形式", inpath)
                 self.size_summary[inpath] = (orig_size, 0, True, "未対応ファイル形式")
+                self.run_on_ui_thread(self.update_tree_status, inpath, "スキップ", "")
                 return
 
         # 処理済みファイルに追加
@@ -3783,13 +3899,21 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         # 進捗を保存
         self.save_logs_to_file()
         
-        # 結果ログ出力
+        # 結果ログ出力 + ツリービュー更新
         if inpath in self.size_summary:
             data = self.size_summary[inpath]
             if len(data) > 2 and not data[2]:  # スキップされていない場合
                 orig, final = data[0], data[1]
                 reduction = (1 - final / orig) * 100 if orig > 0 else 0
                 self.log(f"圧縮率: {reduction:.1f}% ({self.format_size(orig)} → {self.format_size(final)})")
+                self.run_on_ui_thread(self.update_tree_status, inpath, "完了", f"{reduction:.1f}%")
+            else:
+                # スキップ/エラーの判定
+                reason = data[3] if len(data) > 3 else ""
+                status = "エラー" if ("エラー" in reason or "失敗" in reason) else "スキップ"
+                self.run_on_ui_thread(self.update_tree_status, inpath, status, "")
+        else:
+            self.run_on_ui_thread(self.update_tree_status, inpath, "完了", "")
 
     def compress_images_flat(self, src_folder, dst_folder, archive_file=None, pause_callback=None):
         """フォルダ構造を維持したまま画像を圧縮する（v2: 構造維持型）"""
@@ -4073,6 +4197,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         self.current_archive = folder_path
         folder_name = os.path.basename(folder_path.rstrip("/\\"))
         self.log(f"[フォルダ書籍] 処理開始: {folder_name}")
+        self.run_on_ui_thread(self.update_tree_status, folder_path, "処理中", None)
         
         try:
             # フォルダの総サイズを計算
@@ -4175,13 +4300,22 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             logger.exception(f"Folder processing error for {folder_path}")
             self.log_skip(folder_name, f"フォルダエラー: {str(e)}", folder_path)
             self.size_summary[folder_path] = (0, 0, True, f"エラー: {str(e)}")
+            self.run_on_ui_thread(self.update_tree_status, folder_path, "エラー", "")
             return
-        
+
         # 処理済みリストに追加
         self.processed_files.append(folder_path)
         self.processed_count += 1
         self.current_archive = None
         self.save_logs_to_file()
+        # ツリービュー更新
+        if folder_path in self.size_summary:
+            data = self.size_summary[folder_path]
+            if len(data) > 2 and not data[2] and data[0] > 0:
+                ratio = (1 - data[1] / data[0]) * 100
+                self.run_on_ui_thread(self.update_tree_status, folder_path, "完了", f"{ratio:.1f}%")
+            else:
+                self.run_on_ui_thread(self.update_tree_status, folder_path, "完了", "")
         
         if folder_path in self.size_summary:
             data = self.size_summary[folder_path]
