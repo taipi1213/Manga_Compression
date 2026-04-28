@@ -449,6 +449,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         # 進捗追跡用の変数を拡張
         self.start_time = None  # 処理開始時間
         self.processed_count = 0  # 処理済みファイル数
+        self.total_count = 0  # 処理対象の実書籍数（フォルダ内を展開した総数）
         self.elapsed_time_label = None  # 経過時間表示用ラベル
         self.remaining_time_label = None  # 残り時間表示用ラベル
         self.processing_ratio_label = None  # 処理比率表示用ラベル
@@ -1323,14 +1324,14 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         elapsed_seconds = time.time() - self.start_time
         elapsed_formatted = self.format_time(elapsed_seconds)
         
-        # 処理比率の更新
-        total_files = len(self.input_files)
+        # 処理比率の更新（実書籍数ベース、未設定時は入力数）
+        total_files = self.total_count if self.total_count > 0 else len(self.input_files)
         self.processing_ratio_label.config(text=f"処理済み: {self.processed_count}/{total_files}")
-        
+
         # 残り時間計算
         if self.processed_count > 0:
             avg_time_per_file = elapsed_seconds / self.processed_count
-            remaining_files = total_files - self.processed_count
+            remaining_files = max(0, total_files - self.processed_count)
             estimated_remaining_seconds = avg_time_per_file * remaining_files
             remaining_formatted = self.format_time(estimated_remaining_seconds)
             self.remaining_time_label.config(text=f"残り時間: {remaining_formatted}")
@@ -2968,6 +2969,9 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             
             # 重要: ここで処理開始前に変数を初期化
             selected_files = list(self.input_files)  # 処理前に変数を確実に初期化
+
+            # 実書籍数を計算（フォルダ内のアーカイブも展開してカウント）
+            self.total_count = self._compute_total_actual_count(self.input_files)
             
             # 一時ファイルリストをクリア
             self.temp_files.clear()
@@ -3522,7 +3526,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             self.log_error(f"解凍エラー: {e}", inpath)
             raise
 
-    def process_file(self, inpath, output_dir, pause_callback=None):
+    def process_file(self, inpath, output_dir, pause_callback=None, container_root=None):
         # 現在処理中のファイル名を表示
         self.run_on_ui_thread(self.update_current_file_display, inpath)
         
@@ -3623,7 +3627,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
                     # 処理後自動置き換えオプション
                     if self.auto_replace_enabled.get():
-                        self._apply_auto_replace(inpath, out_path)
+                        self._apply_auto_replace(inpath, out_path, container_root=container_root)
                     else:
                         # 元ファイル削除（オプション）
                         if self.delete_original.get():
@@ -3725,7 +3729,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
                         # 処理後自動置き換えオプション
                         if self.auto_replace_enabled.get():
-                            self._apply_auto_replace(inpath, out_path)
+                            self._apply_auto_replace(inpath, out_path, container_root=container_root)
                         else:
                             # 元ファイル削除（オプション）
                             if self.delete_original.get():
@@ -3938,6 +3942,10 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         folder_name = os.path.basename(folder_path.rstrip("/\\"))
         self.log(f"[フォルダコンテナ] {len(archives)}件の書籍を処理: {folder_name}")
 
+        agg_orig = 0
+        agg_final = 0
+        had_success = False
+
         for archive_path in archives:
             if self.cancel_processing:
                 self.log("キャンセルされたため、フォルダ処理を中断しました。")
@@ -3954,10 +3962,27 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 continue
 
             try:
-                self.process_file(archive_path, target_output_dir, pause_callback)
+                self.process_file(archive_path, target_output_dir, pause_callback,
+                                  container_root=folder_path_abs)
+                # 集約サイズ用にsize_summaryから取得
+                if archive_path in self.size_summary:
+                    data = self.size_summary[archive_path]
+                    if len(data) >= 3 and not data[2]:
+                        agg_orig += data[0]
+                        agg_final += data[1]
+                        had_success = True
             except Exception as e:
                 self.log_error(f"書籍処理エラー: {e}", archive_path)
                 logger.exception(f"Container archive processing error for {archive_path}")
+
+        # フォルダ自体をsize_summaryに集約として記録（結果ダイアログでスキップ扱いされないように）
+        if had_success:
+            self.size_summary[folder_path] = (agg_orig, agg_final, False, f"フォルダ: {len(archives)}冊集約")
+        else:
+            self.size_summary[folder_path] = (0, 0, True, "コンテナ内で成功した書籍がありません")
+        # コンテナ完了をprocessed_filesにも追加（show_result_dialogで参照される）
+        if folder_path not in self.processed_files:
+            self.processed_files.append(folder_path)
 
     def verify_output_zip(self, out_path, expected_count=None):
         """出力ZIPの破損チェック。問題があればログに警告を出す。
@@ -4007,6 +4032,29 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             return sum(len(files) for _, _, files in os.walk(dir_path))
         except Exception:
             return None
+
+    def _compute_total_actual_count(self, input_files):
+        """入力リストから実際に処理される書籍数を概算する。
+
+        - ファイル: 1件
+        - フォルダ: 内部の .zip/.cbz/.rar の数（あれば）。なければ1件（単一書籍として扱われる）。
+        """
+        ARC_EXTS = {".zip", ".cbz", ".rar"}
+        total = 0
+        for p in input_files:
+            try:
+                if os.path.isdir(p):
+                    count = 0
+                    for root, _, files in os.walk(p):
+                        for f in files:
+                            if os.path.splitext(f)[1].lower() in ARC_EXTS:
+                                count += 1
+                    total += count if count > 0 else 1
+                else:
+                    total += 1
+            except Exception:
+                total += 1
+        return total
 
     def _process_folder_as_archive(self, folder_path, output_dir, pause_callback, check_pause):
         """フォルダを1つの書籍として処理し、ZIPに圧縮して出力する。フォルダ構造を維持。"""
@@ -4130,12 +4178,13 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 reduction = (1 - final / orig) * 100 if orig > 0 else 0
                 self.log(f"[フォルダ] 圧縮率: {reduction:.1f}% ({self.format_size(orig)} → {self.format_size(final)})")
 
-    def _apply_auto_replace(self, inpath, out_path):
+    def _apply_auto_replace(self, inpath, out_path, container_root=None):
         """処理後自動置き換え: 元ファイルをバックアップへ移動した後、out_pathを元の場所に配置する。
 
-        注意: out_pathとinpathが同名の場合、先にout_pathを移動するとinpathが失われるため、
-        必ず「元ファイルのバックアップ → 出力ファイルの配置」の順で実行する。
-        バックアップフォルダ未設定時はデータ保護のため処理を中断する。
+        container_root が指定されている場合、バックアップ先に
+        <container_root の名前>/<相対パス>/<元ファイル名> の構造を再現する。
+        例: container_root=G:\\トレント\\シリーズA, inpath=G:\\トレント\\シリーズA\\sub\\book.zip
+            → backup_folder\\シリーズA\\sub\\book.zip
         """
         try:
             backup_folder = self.original_backup_folder.get()
@@ -4149,14 +4198,24 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             original_dir = os.path.dirname(os.path.abspath(inpath))
             dest_file = os.path.join(original_dir, os.path.basename(out_path))
 
+            # バックアップ先パスの計算（コンテナルートがあれば構造維持）
+            if container_root:
+                container_name = os.path.basename(os.path.abspath(container_root).rstrip("/\\"))
+                rel_path = os.path.relpath(os.path.abspath(inpath), os.path.abspath(container_root))
+                backup_target_dir = os.path.join(backup_folder, container_name, os.path.dirname(rel_path))
+                os.makedirs(backup_target_dir, exist_ok=True)
+                dest_backup = os.path.join(backup_target_dir, os.path.basename(inpath))
+            else:
+                dest_backup = os.path.join(backup_folder, os.path.basename(inpath))
+
             # ステップ1: 元ファイルをバックアップフォルダへ移動（先に実行）
-            dest_backup = os.path.join(backup_folder, os.path.basename(inpath))
             if os.path.exists(dest_backup):
                 base, ext = os.path.splitext(os.path.basename(inpath))
+                target_dir = os.path.dirname(dest_backup)
                 counter = 1
-                while os.path.exists(os.path.join(backup_folder, f"{base}_{counter}{ext}")):
+                while os.path.exists(os.path.join(target_dir, f"{base}_{counter}{ext}")):
                     counter += 1
-                dest_backup = os.path.join(backup_folder, f"{base}_{counter}{ext}")
+                dest_backup = os.path.join(target_dir, f"{base}_{counter}{ext}")
             shutil.move(inpath, dest_backup)
             self.log(f"元ファイルを移動: {inpath} → {dest_backup}")
 
@@ -4176,6 +4235,9 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         if folder:
             self.original_backup_folder.set(folder)
 
+    # ZIPアーカイブのコメントに埋め込む処理済みマーカー（ファイル名は変更せずメタデータで識別）
+    PROCESSED_MARKER_PREFIX = "MangaCompressor:processed"
+
     def create_zip_from_folder(self, folder_path, out_zip):
         try:
             with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -4184,6 +4246,9 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                         full_path = os.path.join(root, f)
                         arcname = os.path.relpath(full_path, folder_path)
                         zf.write(full_path, arcname)
+                # 処理済みマーカーをZIPコメントに埋め込む（ファイル名は変更しない）
+                marker = f"{self.PROCESSED_MARKER_PREFIX} at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                zf.comment = marker.encode('utf-8')
             self.log(LANG["zip_complete"].format(out_zip))
         except Exception as e:
             self.log_error(f"ZIP作成エラー: {e}")
