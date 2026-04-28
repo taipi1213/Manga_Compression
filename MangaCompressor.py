@@ -4416,6 +4416,15 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             else:
                 dest_backup = os.path.join(backup_folder, os.path.basename(inpath))
 
+            # 出力ファイルがバックアップ先と同じ場所にある場合は先に退避
+            # （出力フォルダ == 元ファイル移動先 のときに発生し、誤って _1 が付くのを防ぐ）
+            if os.path.abspath(out_path) == os.path.abspath(dest_backup):
+                tmp_out = out_path + ".__mc_swap__"
+                if os.path.exists(tmp_out):
+                    os.remove(tmp_out)
+                shutil.move(out_path, tmp_out)
+                out_path = tmp_out
+
             # ステップ1: 元ファイルをバックアップフォルダへ移動（先に実行）
             if os.path.exists(dest_backup):
                 base, ext = os.path.splitext(os.path.basename(inpath))
