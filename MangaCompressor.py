@@ -493,6 +493,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
         # --- 出力タブの設定 ---
         self.skip_if_larger = tk.BooleanVar(value=True)
+        self.skip_already_processed = tk.BooleanVar(value=True)  # 処理済みマーカー検出時にスキップ
         self.delete_original = tk.BooleanVar(value=False)
         self.file_suffix = tk.StringVar(value="")
         
@@ -2663,6 +2664,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             "resize_width": self.resize_width.get(),
             "resize_height": self.resize_height.get(),
             "skip_if_larger": self.skip_if_larger.get(),
+            "skip_already_processed": self.skip_already_processed.get(),
             "delete_original": self.delete_original.get(),
             "delete_original_mode": self.delete_original_mode.get(),
             "file_suffix": self.file_suffix.get(),
@@ -2728,6 +2730,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             self.resize_width.set(config.get("resize_width", 0))
             self.resize_height.set(config.get("resize_height", 0))
             self.skip_if_larger.set(config.get("skip_if_larger", True))
+            self.skip_already_processed.set(config.get("skip_already_processed", True))
             self.delete_original.set(config.get("delete_original", False))
             self.file_suffix.set(config.get("file_suffix", ""))
             if "delete_original_mode" in config: self.delete_original_mode.set(config.get("delete_original_mode", "trash"))
@@ -2782,6 +2785,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         frame_out = ttk.LabelFrame(parent, text=LANG["output_settings"])
         frame_out.pack(fill=tk.X, padx=5, pady=5)
         tk.Checkbutton(frame_out, text=LANG["skip_if_larger"], variable=self.skip_if_larger).pack(anchor="w", padx=5, pady=2)
+        tk.Checkbutton(frame_out, text="処理済みマーカー付きのZIPはスキップ（再処理を避ける）",
+                       variable=self.skip_already_processed).pack(anchor="w", padx=5, pady=2)
         
         # 元ファイル削除フレーム
         delete_frame = tk.Frame(frame_out)
@@ -3570,7 +3575,14 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 try:
                     # 一時停止チェック
                     check_pause()
-                    
+
+                    # 処理済みマーカー検出時はスキップ（ZIPのみ判定可能）
+                    if ext == ".zip" and self.skip_already_processed.get() and self.is_already_processed(inpath):
+                        self.log(f"[再処理スキップ] 処理済みマーカーを検出: {os.path.basename(inpath)}")
+                        self.log_skip(os.path.basename(inpath), "処理済みマーカー検出（再処理スキップ）", inpath)
+                        self.size_summary[inpath] = (orig_size, 0, True, "処理済みマーカー検出")
+                        return
+
                     # 解凍処理が成功したかどうかをチェック
                     if not self.extract_archive(inpath, ext, temp_dir):
                         # すでにsize_summaryに記録されているのでreturn
@@ -4237,6 +4249,24 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
     # ZIPアーカイブのコメントに埋め込む処理済みマーカー（ファイル名は変更せずメタデータで識別）
     PROCESSED_MARKER_PREFIX = "MangaCompressor:processed"
+
+    def is_already_processed(self, zip_path):
+        """ZIPコメントを読み、処理済みマーカーが含まれていればTrueを返す。
+
+        対象がZIPでない/開けない場合はFalse（処理対象とする）。
+        """
+        try:
+            if not zipfile.is_zipfile(zip_path):
+                return False
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                comment = zf.comment or b""
+            try:
+                text = comment.decode('utf-8', errors='replace')
+            except Exception:
+                return False
+            return self.PROCESSED_MARKER_PREFIX in text
+        except Exception:
+            return False
 
     def create_zip_from_folder(self, folder_path, out_zip):
         try:
