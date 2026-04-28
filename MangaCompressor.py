@@ -149,7 +149,8 @@ def compress_image_worker(src_path, dst_folder, jpeg_quality, jpeg_progressive, 
                 time.sleep(0.1)  # 一時停止中は待機
 
         # Caesium CLTコマンド実行
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
        
         # エラーチェック
         if result.returncode != 0:
@@ -3484,7 +3485,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             elif ext == ".rar":
                 # 7-Zipを使用してRARを展開
                 cmd = ["7z", "x", "-y", "-o" + out_dir, inpath]
-                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True,
+                                        creationflags=subprocess.CREATE_NO_WINDOW)
                 if result.returncode != 0:
                     raise Exception(f"7z error: {result.stderr}")
                 
@@ -4248,7 +4250,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
     def check_7z(self):
         """7zコマンドが使用可能かチェック"""
         try:
-            subprocess.run(["7z", "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["7z", "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
             return True
         except (FileNotFoundError, subprocess.SubprocessError):
             return False
@@ -4256,7 +4259,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
     def check_caesium_clt(self):
         """Caesium CLTコマンドが使用可能かチェック"""
         try:
-            subprocess.run(["caesiumclt", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["caesiumclt", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
             return True
         except (FileNotFoundError, subprocess.SubprocessError):
             return False
