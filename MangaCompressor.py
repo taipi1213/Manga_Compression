@@ -501,8 +501,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         self.delete_original_mode = tk.StringVar(value="trash")  # "trash" または "permanent"
         
         # --- 新機能：処理後自動置き換えオプション ---
-        self.auto_replace_enabled = tk.BooleanVar(value=False)  # ON/OFFフラグ
-        self.original_backup_folder = tk.StringVar(value="")   # 元ファイルの移動先フォルダ
+        self.auto_replace_enabled = tk.BooleanVar(value=True)  # ON/OFFフラグ
+        self.original_backup_folder = tk.StringVar(value="F:/漫画")   # 元ファイルの移動先フォルダ
         
         # --- 高度な設定タブ（追加） ---
         self.max_workers = tk.IntVar(value=20)  # Ryzen 9 5900X向け最適値
@@ -871,6 +871,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         tk.Label(top_frame, text=f"  {LANG['output_folder']}").pack(side=tk.LEFT, padx=(20, 0))
         tk.Entry(top_frame, textvariable=self.output_folder, width=40).pack(side=tk.LEFT, padx=5)
         tk.Button(top_frame, text=LANG["browse"], command=self.select_output_folder).pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(top_frame, text="処理後自動置き換え",
+                       variable=self.auto_replace_enabled).pack(side=tk.LEFT, padx=(15, 0))
 
         # ファイル一覧表示エリア（Listbox）とスクロールバー
         list_frame = tk.Frame(left_frame)
@@ -2913,15 +2915,10 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         frame_suffix.pack(fill=tk.X, padx=5, pady=5)
         tk.Entry(frame_suffix, textvariable=self.file_suffix, width=30).pack(side=tk.LEFT, padx=5, pady=5)
         
-        # --- 新機能：処理後自動置き換えオプション ---
-        frame_replace = ttk.LabelFrame(parent, text="処理後自動置き換え（元の場所に配置 & 元ファイルを移動）")
+        # --- 処理後自動置き換え（チェックボックスは上部の出力先右隣に配置済み） ---
+        frame_replace = ttk.LabelFrame(parent, text="処理後自動置き換え（元ファイルの移動先設定）")
         frame_replace.pack(fill=tk.X, padx=5, pady=5)
-        
-        replace_row = tk.Frame(frame_replace)
-        replace_row.pack(fill=tk.X, padx=5, pady=3)
-        tk.Checkbutton(replace_row, text="処理後に元の場所へ配置し、元ファイルを移動する",
-                       variable=self.auto_replace_enabled).pack(side=tk.LEFT)
-        
+
         backup_row = tk.Frame(frame_replace)
         backup_row.pack(fill=tk.X, padx=5, pady=3)
         tk.Label(backup_row, text="元ファイルの移動先:").pack(side=tk.LEFT)
