@@ -3540,9 +3540,9 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         # 最初の一時停止チェック
         check_pause()
         
-        # フォルダの場合は専用メソッドに委譲
+        # フォルダの場合: 中身を判定して振り分け
         if os.path.isdir(inpath):
-            self._process_folder_as_archive(inpath, output_dir, pause_callback, check_pause)
+            self._process_folder(inpath, output_dir, pause_callback, check_pause)
             return
 
         # 画像ファイルの場合は現在処理中の画像を表示
@@ -3601,13 +3601,18 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                        
                     self.log(LANG["new_zip"].format(out_path))
                     self.create_zip_from_folder(compressed_dir, out_path)
-                       
+
+                    # 出力ZIPの破損チェック
+                    expected = self._count_files_in_dir(compressed_dir)
+                    if not self.verify_output_zip(out_path, expected_count=expected):
+                        self.log_error(f"出力ZIPの検証に失敗しました: {out_path}", inpath)
+
                     # ZIPファイルの日時を元と合わせる
                     try:
                         shutil.copystat(inpath, out_path)
                     except Exception as e:
                         self.log(LANG["copy_date_fail"].format(e))
-                           
+
                     final_size = os.path.getsize(out_path)
                        
                     # 処理結果を記録（スキップなし）
@@ -3902,6 +3907,107 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             summary_text = f"[{archive_name}] 処理サマリー:\n" + "\n".join(summary_lines)
             self.log(summary_text)
 
+    def _process_folder(self, folder_path, output_dir, pause_callback, check_pause):
+        """選択フォルダの内容を判定して振り分ける。
+
+        - 書籍アーカイブ(.zip/.cbz/.rar)を含む → コンテナとして各書籍を個別処理（サブフォルダ構造を維持）
+        - 画像のみ → フォルダ自体を1つの書籍として処理
+        """
+        archives = []
+        has_loose_images = False
+        IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".gif", ".bmp"}
+        ARC_EXTS = {".zip", ".cbz", ".rar"}
+        for root, dirs, files in os.walk(folder_path):
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in ARC_EXTS:
+                    archives.append(os.path.join(root, f))
+                elif ext in IMG_EXTS:
+                    has_loose_images = True
+
+        if archives:
+            if has_loose_images:
+                self.log("[警告] フォルダ内にアーカイブと裸の画像が混在しています。アーカイブのみ処理します。")
+            self._process_folder_as_container(folder_path, archives, output_dir, pause_callback, check_pause)
+        else:
+            self._process_folder_as_archive(folder_path, output_dir, pause_callback, check_pause)
+
+    def _process_folder_as_container(self, folder_path, archives, output_dir, pause_callback, check_pause):
+        """フォルダ内の各書籍ファイルを個別に処理し、サブフォルダ構造を維持して出力する。"""
+        folder_path_abs = os.path.abspath(folder_path)
+        folder_name = os.path.basename(folder_path.rstrip("/\\"))
+        self.log(f"[フォルダコンテナ] {len(archives)}件の書籍を処理: {folder_name}")
+
+        for archive_path in archives:
+            if self.cancel_processing:
+                self.log("キャンセルされたため、フォルダ処理を中断しました。")
+                break
+            check_pause()
+
+            # 相対サブフォルダを計算 (folder_name を含めて出力先に元フォルダを再現)
+            rel_dir = os.path.dirname(os.path.relpath(archive_path, folder_path_abs))
+            target_output_dir = os.path.join(output_dir, folder_name, rel_dir) if rel_dir else os.path.join(output_dir, folder_name)
+            try:
+                os.makedirs(target_output_dir, exist_ok=True)
+            except Exception as e:
+                self.log_error(f"出力サブフォルダ作成失敗: {e}", archive_path)
+                continue
+
+            try:
+                self.process_file(archive_path, target_output_dir, pause_callback)
+            except Exception as e:
+                self.log_error(f"書籍処理エラー: {e}", archive_path)
+                logger.exception(f"Container archive processing error for {archive_path}")
+
+    def verify_output_zip(self, out_path, expected_count=None):
+        """出力ZIPの破損チェック。問題があればログに警告を出す。
+
+        Returns: True (正常) / False (破損または問題あり)
+        """
+        try:
+            if not os.path.isfile(out_path):
+                self.log_error(f"検証: 出力ファイルが存在しません: {out_path}")
+                return False
+
+            size = os.path.getsize(out_path)
+            # 22バイトは空ZIPのEnd-of-Central-Directoryのみのサイズ
+            if size <= 22:
+                self.log_error(f"検証: 出力ZIPが空または異常に小さい ({size}バイト): {out_path}")
+                return False
+
+            with zipfile.ZipFile(out_path, 'r') as zf:
+                bad = zf.testzip()
+                if bad is not None:
+                    self.log_error(f"検証: ZIP内に破損エントリ '{bad}': {out_path}")
+                    return False
+                actual_count = len([n for n in zf.namelist() if not n.endswith('/')])
+
+            if actual_count == 0:
+                self.log_error(f"検証: 出力ZIPにファイルが含まれていません: {out_path}")
+                return False
+
+            if expected_count is not None and actual_count < expected_count:
+                self.log_error(
+                    f"検証: ファイル数不足 (期待:{expected_count}, 実際:{actual_count}): {out_path}"
+                )
+                return False
+
+            self.log(f"[検証OK] {os.path.basename(out_path)} ({actual_count}ファイル)")
+            return True
+        except zipfile.BadZipFile:
+            self.log_error(f"検証: 不正なZIPファイル: {out_path}")
+            return False
+        except Exception as e:
+            self.log_error(f"検証エラー: {e}: {out_path}")
+            return False
+
+    def _count_files_in_dir(self, dir_path):
+        """ディレクトリ内のファイル総数（再帰）"""
+        try:
+            return sum(len(files) for _, _, files in os.walk(dir_path))
+        except Exception:
+            return None
+
     def _process_folder_as_archive(self, folder_path, output_dir, pause_callback, check_pause):
         """フォルダを1つの書籍として処理し、ZIPに圧縮して出力する。フォルダ構造を維持。"""
         self.current_archive = folder_path
@@ -3945,13 +4051,18 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 
                 self.log(LANG["new_zip"].format(out_path))
                 self.create_zip_from_folder(compressed_dir, out_path)
-                
+
+                # 出力ZIPの破損チェック
+                expected = self._count_files_in_dir(compressed_dir)
+                if not self.verify_output_zip(out_path, expected_count=expected):
+                    self.log_error(f"出力ZIPの検証に失敗しました: {out_path}", folder_path)
+
                 # 日時を元フォルダに合わせる
                 try:
                     shutil.copystat(folder_path, out_path)
                 except Exception as e:
                     self.log(LANG["copy_date_fail"].format(e))
-                
+
                 final_size = os.path.getsize(out_path)
                 self.size_summary[folder_path] = (orig_size, final_size, False, "")
                 
