@@ -3744,10 +3744,14 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                         self.log(LANG["copy_date_fail"].format(e))
 
                     final_size = os.path.getsize(out_path)
-                       
+
+                    # 圧縮率5%未満なら破損リスクを避けてスキップ（元ファイルを保持）
+                    if self._is_low_reduction_skip(orig_size, final_size, inpath, out_path):
+                        return
+
                     # 処理結果を記録（スキップなし）
                     self.size_summary[inpath] = (orig_size, final_size, False, "")
-                    
+
                     # 一時停止チェック
                     check_pause()
 
@@ -3757,6 +3761,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                     else:
                         # 元ファイル削除（オプション）
                         if self.delete_original.get():
+                            parent_dir = os.path.dirname(os.path.abspath(inpath))
+                            parent_stat = self._capture_folder_stat(parent_dir)
                             try:
                                 self.log(LANG["original_delete"].format(inpath))
                                 if self.delete_original_mode.get() == "trash":
@@ -3767,6 +3773,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                                     self.log(f"完全に削除: {inpath}")
                             except Exception as e:
                                 self.log_error(f"元ファイル削除エラー: {e}", inpath)
+                            self._restore_folder_stat(parent_dir, parent_stat)
                        
                 except Exception as e:
                     self.log_error(f"アーカイブ処理エラー: {e}", inpath)
@@ -3849,8 +3856,13 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                         
                         # 処理結果を記録
                         final_size = os.path.getsize(out_path)
+
+                        # 圧縮率5%未満ならスキップ（元ファイルを保持）
+                        if self._is_low_reduction_skip(orig_size, final_size, inpath, out_path):
+                            return
+
                         self.size_summary[inpath] = (orig_size, final_size, False, "")
-                        
+
                         # 一時停止チェック
                         check_pause()
 
@@ -3860,6 +3872,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                         else:
                             # 元ファイル削除（オプション）
                             if self.delete_original.get():
+                                parent_dir = os.path.dirname(os.path.abspath(inpath))
+                                parent_stat = self._capture_folder_stat(parent_dir)
                                 try:
                                     self.log(LANG["original_delete"].format(inpath))
                                     if self.delete_original_mode.get() == "trash":
@@ -3870,6 +3884,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                                         self.log(f"完全に削除: {inpath}")
                                 except Exception as e:
                                     self.log_error(f"元ファイル削除エラー: {e}")
+                                self._restore_folder_stat(parent_dir, parent_stat)
                     else:
                         # エラーメッセージがある場合
                         self.log_error(f"圧縮処理に失敗しました: {inpath} - {result[2]}")
@@ -4249,10 +4264,15 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                     self.log(LANG["copy_date_fail"].format(e))
 
                 final_size = os.path.getsize(out_path)
+
+                # 圧縮率5%未満ならスキップ（元フォルダを保持）
+                if self._is_low_reduction_skip(orig_size, final_size, folder_path, out_path):
+                    return
+
                 self.size_summary[folder_path] = (orig_size, final_size, False, "")
-                
+
                 check_pause()
-                
+
                 # 処理後自動置き換えオプション
                 if self.auto_replace_enabled.get():
                     # out_path（ZIP）を元フォルダの親ディレクトリへ移動
@@ -4284,6 +4304,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 else:
                     # 元ファイル削除（オプション）
                     if self.delete_original.get():
+                        grandparent_dir = os.path.dirname(os.path.abspath(folder_path))
+                        grandparent_stat = self._capture_folder_stat(grandparent_dir)
                         try:
                             self.log(LANG["original_delete"].format(folder_path))
                             if self.delete_original_mode.get() == "trash":
@@ -4294,6 +4316,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                                 self.log(f"完全に削除: {folder_path}")
                         except Exception as e:
                             self.log_error(f"元フォルダ削除エラー: {e}", folder_path)
+                        self._restore_folder_stat(grandparent_dir, grandparent_stat)
                             
         except Exception as e:
             self.log_error(f"フォルダ処理エラー: {e}", folder_path)
@@ -4324,6 +4347,45 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 reduction = (1 - final / orig) * 100 if orig > 0 else 0
                 self.log(f"[フォルダ] 圧縮率: {reduction:.1f}% ({self.format_size(orig)} → {self.format_size(final)})")
 
+    def _capture_folder_stat(self, folder_path):
+        """フォルダの atime/mtime を取得（ファイル追加/削除でOSが更新するため）。"""
+        try:
+            if os.path.isdir(folder_path):
+                return os.stat(folder_path)
+        except Exception:
+            pass
+        return None
+
+    def _restore_folder_stat(self, folder_path, stat_obj):
+        """フォルダの atime/mtime を復元する。書籍管理アプリの並び順を守る目的。"""
+        if stat_obj is None:
+            return
+        try:
+            os.utime(folder_path, (stat_obj.st_atime, stat_obj.st_mtime))
+        except Exception as e:
+            self.log_error(f"フォルダ日時の復元に失敗: {folder_path} ({e})")
+
+    def _is_low_reduction_skip(self, orig_size, final_size, target_path, out_path):
+        """圧縮率が5%未満なら出力を破棄してスキップ扱いにする。Trueを返した場合、呼び出し元は処理を中断する。"""
+        if orig_size <= 0:
+            return False
+        reduction = (1 - final_size / orig_size) * 100
+        if reduction >= 5.0:
+            return False
+        self.log(f"圧縮率{reduction:.1f}%（5%未満）のためスキップ: {target_path}")
+        try:
+            if out_path and os.path.exists(out_path):
+                os.remove(out_path)
+        except Exception:
+            pass
+        self.size_summary[target_path] = (orig_size, orig_size, True, f"圧縮率不足({reduction:.1f}%)")
+        try:
+            self.log_skip(os.path.basename(target_path), f"圧縮率{reduction:.1f}%（5%未満）", target_path)
+        except TypeError:
+            self.log_skip(os.path.basename(target_path), f"圧縮率{reduction:.1f}%（5%未満）")
+        self.run_on_ui_thread(self.update_tree_status, target_path, "スキップ(低圧縮率)", f"{reduction:.1f}%")
+        return True
+
     def _apply_auto_replace(self, inpath, out_path, container_root=None):
         """処理後自動置き換え: 元ファイルをバックアップへ移動した後、out_pathを元の場所に配置する。
 
@@ -4343,6 +4405,9 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
             original_dir = os.path.dirname(os.path.abspath(inpath))
             dest_file = os.path.join(original_dir, os.path.basename(out_path))
+
+            # 親フォルダの日時を保存（後で復元してComicShare等の並び順を維持）
+            parent_stat = self._capture_folder_stat(original_dir)
 
             # バックアップ先パスの計算（コンテナルートがあれば構造維持）
             if container_root:
@@ -4372,6 +4437,9 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                     os.remove(dest_file)
                 shutil.move(out_path, dest_file)
             self.log(f"元の場所に配置: {dest_file}")
+
+            # 親フォルダの日時を復元（書籍管理アプリの更新日時順を維持）
+            self._restore_folder_stat(original_dir, parent_stat)
         except Exception as e:
             self.log_error(f"自動置き換えエラー: {e}", inpath)
 
