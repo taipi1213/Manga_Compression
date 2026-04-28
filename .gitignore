@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Backup files
+*.bak
+
+# Log files
+*.log
+log/
+
+# Temp & working directories
+0/
+一時/
+エラー/
+
+# Claude internal
+.claude/
+
+# Misc
+[].png
