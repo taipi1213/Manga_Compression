@@ -3724,7 +3724,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             self.log_error(f"解凍エラー: {e}", inpath)
             raise
 
-    def process_file(self, inpath, output_dir, pause_callback=None, container_root=None):
+    def process_file(self, inpath, output_dir, pause_callback=None, container_root=None, output_root=None):
         # 現在処理中のファイル名を表示
         self.run_on_ui_thread(self.update_current_file_display, inpath)
         # ツリービューのステータスを「処理中」に更新
@@ -3746,7 +3746,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         
         # フォルダの場合: 中身を判定して振り分け
         if os.path.isdir(inpath):
-            self._process_folder(inpath, output_dir, pause_callback, check_pause)
+            self._process_folder(inpath, output_dir, pause_callback, check_pause, output_root=(output_root or output_dir))
             return
 
         # 画像ファイルの場合は現在処理中の画像を表示
@@ -3840,7 +3840,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
                     # 処理後自動置き換えオプション
                     if self.auto_replace_enabled.get():
-                        self._apply_auto_replace(inpath, out_path, container_root=container_root)
+                        self._apply_auto_replace(inpath, out_path, container_root=container_root, output_dir=(output_root or output_dir))
                     else:
                         # 元ファイル削除（オプション）
                         if self.delete_original.get():
@@ -3951,7 +3951,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
                         # 処理後自動置き換えオプション
                         if self.auto_replace_enabled.get():
-                            self._apply_auto_replace(inpath, out_path, container_root=container_root)
+                            self._apply_auto_replace(inpath, out_path, container_root=container_root, output_dir=(output_root or output_dir))
                         else:
                             # 元ファイル削除（オプション）
                             if self.delete_original.get():
@@ -4145,7 +4145,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             summary_text = f"[{archive_name}] 処理サマリー:\n" + "\n".join(summary_lines)
             self.log(summary_text)
 
-    def _process_folder(self, folder_path, output_dir, pause_callback, check_pause):
+    def _process_folder(self, folder_path, output_dir, pause_callback, check_pause, output_root=None):
         """選択フォルダの内容を判定して振り分ける。
 
         - 書籍アーカイブ(.zip/.cbz/.rar)を含む → コンテナとして各書籍を個別処理（サブフォルダ構造を維持）
@@ -4168,14 +4168,15 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 elif ext in IMG_EXTS:
                     has_loose_images = True
 
+        effective_root = output_root or output_dir
         if archives:
             if has_loose_images:
                 self.log("[警告] フォルダ内にアーカイブと裸の画像が混在しています。アーカイブのみ処理します。")
-            self._process_folder_as_container(folder_path, archives, output_dir, pause_callback, check_pause)
+            self._process_folder_as_container(folder_path, archives, output_dir, pause_callback, check_pause, output_root=effective_root)
         else:
             self._process_folder_as_archive(folder_path, output_dir, pause_callback, check_pause)
 
-    def _process_folder_as_container(self, folder_path, archives, output_dir, pause_callback, check_pause):
+    def _process_folder_as_container(self, folder_path, archives, output_dir, pause_callback, check_pause, output_root=None):
         """フォルダ内の各書籍ファイルを個別に処理し、サブフォルダ構造を維持して出力する。"""
         folder_path_abs = os.path.abspath(folder_path)
         folder_name = os.path.basename(folder_path.rstrip("/\\"))
@@ -4202,7 +4203,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
             try:
                 self.process_file(archive_path, target_output_dir, pause_callback,
-                                  container_root=folder_path_abs)
+                                  container_root=folder_path_abs,
+                                  output_root=(output_root or output_dir))
                 # 集約サイズ用にsize_summaryから取得
                 if archive_path in self.size_summary:
                     data = self.size_summary[archive_path]
@@ -4213,6 +4215,21 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             except Exception as e:
                 self.log_error(f"書籍処理エラー: {e}", archive_path)
                 logger.exception(f"Container archive processing error for {archive_path}")
+
+        # 出力先に残った空のサブツリーを掃除（auto_replace後の名残対策）
+        effective_root = output_root or output_dir
+        try:
+            container_top = os.path.join(effective_root, folder_name)
+            if os.path.isdir(container_top):
+                # 空フォルダを内側から削除
+                for root, dirs, files in os.walk(container_top, topdown=False):
+                    if not dirs and not files:
+                        try:
+                            os.rmdir(root)
+                        except OSError:
+                            pass
+        except Exception:
+            pass
 
         # フォルダ自体をsize_summaryに集約として記録（結果ダイアログでスキップ扱いされないように）
         if had_success:
@@ -4474,13 +4491,47 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         self.run_on_ui_thread(self.update_tree_status, target_path, "スキップ(低圧縮率)", f"{reduction:.1f}%")
         return True
 
-    def _apply_auto_replace(self, inpath, out_path, container_root=None):
+    def _cleanup_empty_dirs(self, start_dir, boundary):
+        """start_dir から boundary（含まない）まで遡り、空ディレクトリを削除する。"""
+        if not start_dir or not boundary:
+            return
+        try:
+            boundary_abs = os.path.abspath(boundary).rstrip("/\\")
+            cur = os.path.abspath(start_dir).rstrip("/\\")
+            # boundary 配下でないなら何もしない
+            if not cur.startswith(boundary_abs + os.sep) and cur != boundary_abs:
+                return
+            while cur and cur != boundary_abs:
+                try:
+                    os.rmdir(cur)
+                except OSError:
+                    break  # 空でない or 削除不可
+                cur = os.path.dirname(cur)
+        except Exception:
+            pass
+
+    def _move_with_retry(self, src, dst, retries=3, delay=1.0):
+        """shutil.move をリトライ付きで実行（ファイルロック等の一時的失敗を回避）。"""
+        last_exc = None
+        for attempt in range(retries):
+            try:
+                shutil.move(src, dst)
+                return True
+            except (OSError, PermissionError) as e:
+                last_exc = e
+                if attempt < retries - 1:
+                    time.sleep(delay * (attempt + 1))
+        if last_exc:
+            raise last_exc
+        return False
+
+    def _apply_auto_replace(self, inpath, out_path, container_root=None, output_dir=None):
         """処理後自動置き換え: 元ファイルをバックアップへ移動した後、out_pathを元の場所に配置する。
 
         container_root が指定されている場合、バックアップ先に
         <container_root の名前>/<相対パス>/<元ファイル名> の構造を再現する。
-        例: container_root=G:\\トレント\\シリーズA, inpath=G:\\トレント\\シリーズA\\sub\\book.zip
-            → backup_folder\\シリーズA\\sub\\book.zip
+        output_dir が指定されている場合、処理成功後に out_path の親階層に残った
+        空フォルダを output_dir まで遡って削除する。
         """
         try:
             backup_folder = self.original_backup_folder.get()
@@ -4493,6 +4544,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
             original_dir = os.path.dirname(os.path.abspath(inpath))
             dest_file = os.path.join(original_dir, os.path.basename(out_path))
+            out_path_dir = os.path.dirname(os.path.abspath(out_path))
 
             # 親フォルダの日時を保存（後で復元してComicShare等の並び順を維持）
             parent_stat = self._capture_folder_stat(original_dir)
@@ -4507,6 +4559,24 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             else:
                 dest_backup = os.path.join(backup_folder, os.path.basename(inpath))
 
+            # 元ファイル移動先がinpathと同じパスになる場合は中止
+            # （元ファイル移動先がソースの親階層にあるなどの誤設定）
+            if os.path.abspath(dest_backup) == os.path.abspath(inpath):
+                self.log_error(
+                    "元ファイル移動先が元ファイルと同じパスに解決されます。"
+                    "バックアップ先設定を見直してください。自動置き換えを中断しました。",
+                    inpath,
+                )
+                # 出力先に残ったout_pathも掃除しないと孤立するので削除
+                try:
+                    if os.path.exists(out_path):
+                        os.remove(out_path)
+                except Exception:
+                    pass
+                if output_dir:
+                    self._cleanup_empty_dirs(out_path_dir, output_dir)
+                return
+
             # 出力ファイルがバックアップ先と同じ場所にある場合は先に退避
             # （出力フォルダ == 元ファイル移動先 のときに発生し、誤って _1 が付くのを防ぐ）
             if os.path.abspath(out_path) == os.path.abspath(dest_backup):
@@ -4516,7 +4586,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 shutil.move(out_path, tmp_out)
                 out_path = tmp_out
 
-            # ステップ1: 元ファイルをバックアップフォルダへ移動（先に実行）
+            # ステップ1: 元ファイルをバックアップフォルダへ移動（先に実行・リトライ付き）
             if os.path.exists(dest_backup):
                 base, ext = os.path.splitext(os.path.basename(inpath))
                 target_dir = os.path.dirname(dest_backup)
@@ -4524,21 +4594,33 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 while os.path.exists(os.path.join(target_dir, f"{base}_{counter}{ext}")):
                     counter += 1
                 dest_backup = os.path.join(target_dir, f"{base}_{counter}{ext}")
-            shutil.move(inpath, dest_backup)
+            self._move_with_retry(inpath, dest_backup)
             self.log(f"元ファイルを移動: {inpath} → {dest_backup}")
 
-            # ステップ2: 出力ファイルを元の場所に配置
-            # inpathを既に移動済みなので、dest_fileに残っていれば別の既存ファイル
+            # ステップ2: 出力ファイルを元の場所に配置（リトライ付き）
             if os.path.abspath(out_path) != os.path.abspath(dest_file):
                 if os.path.exists(dest_file):
                     os.remove(dest_file)
-                shutil.move(out_path, dest_file)
+                self._move_with_retry(out_path, dest_file)
             self.log(f"元の場所に配置: {dest_file}")
 
             # 親フォルダの日時を復元（書籍管理アプリの更新日時順を維持）
             self._restore_folder_stat(original_dir, parent_stat)
+
+            # 出力先に残った空フォルダを削除（output_dir 配下のみ・boundary含まず）
+            if output_dir:
+                self._cleanup_empty_dirs(out_path_dir, output_dir)
         except Exception as e:
             self.log_error(f"自動置き換えエラー: {e}", inpath)
+            # 失敗時、out_pathが出力先サブフォルダに孤立しないよう削除
+            try:
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+                    self.log(f"自動置き換え失敗のため出力ファイルを削除: {out_path}")
+            except Exception:
+                pass
+            if output_dir:
+                self._cleanup_empty_dirs(out_path_dir, output_dir)
 
     def select_backup_folder(self):
         """元ファイルの移動先フォルダを選択"""
