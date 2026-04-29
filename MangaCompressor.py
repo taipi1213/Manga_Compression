@@ -912,10 +912,43 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         tk.Button(top_frame, text=LANG["browse"], command=self.select_input_files).pack(side=tk.LEFT, padx=5)
         tk.Button(top_frame, text="フォルダ選択", command=self.select_input_folder).pack(side=tk.LEFT, padx=2)
         tk.Label(top_frame, text=f"  {LANG['output_folder']}").pack(side=tk.LEFT, padx=(20, 0))
-        tk.Entry(top_frame, textvariable=self.output_folder, width=40).pack(side=tk.LEFT, padx=5)
+        tk.Entry(top_frame, textvariable=self.output_folder, width=30).pack(side=tk.LEFT, padx=5)
         tk.Button(top_frame, text=LANG["browse"], command=self.select_output_folder).pack(side=tk.LEFT, padx=5)
-        tk.Checkbutton(top_frame, text="処理後自動置き換え",
-                       variable=self.auto_replace_enabled).pack(side=tk.LEFT, padx=(15, 0))
+
+        # 出力モード: 通常出力 / 処理後自動置き換え（選ばれた方を強調、他方をディム）
+        mode_frame = tk.Frame(top_frame)
+        mode_frame.pack(side=tk.LEFT, padx=(15, 0))
+        self._rb_normal = tk.Radiobutton(mode_frame, text="通常出力",
+                                         variable=self.auto_replace_enabled, value=False)
+        self._rb_normal.pack(side=tk.LEFT)
+        self._rb_auto = tk.Radiobutton(mode_frame, text="処理後自動置き換え",
+                                       variable=self.auto_replace_enabled, value=True)
+        self._rb_auto.pack(side=tk.LEFT, padx=(5, 0))
+
+        # 元ファイル移動先（自動置き換えの右に配置）
+        tk.Label(top_frame, text="  元ファイル移動先:").pack(side=tk.LEFT, padx=(15, 0))
+        self._backup_entry = tk.Entry(top_frame, textvariable=self.original_backup_folder, width=20)
+        self._backup_entry.pack(side=tk.LEFT, padx=5)
+        self._backup_btn = tk.Button(top_frame, text=LANG["browse"], command=self.select_backup_folder)
+        self._backup_btn.pack(side=tk.LEFT, padx=5)
+
+        def _update_mode_visual(*_args):
+            try:
+                if self.auto_replace_enabled.get():
+                    self._rb_auto.config(fg="black", font=("", 9, "bold"))
+                    self._rb_normal.config(fg="gray60", font=("", 9, ""))
+                    self._backup_entry.config(state="normal", fg="black")
+                    self._backup_btn.config(state="normal")
+                else:
+                    self._rb_auto.config(fg="gray60", font=("", 9, ""))
+                    self._rb_normal.config(fg="black", font=("", 9, "bold"))
+                    self._backup_entry.config(state="disabled")
+                    self._backup_btn.config(state="disabled")
+            except Exception:
+                pass
+
+        self.auto_replace_enabled.trace_add("write", _update_mode_visual)
+        _update_mode_visual()
 
         # ファイル一覧表示エリア（Listbox）とスクロールバー
         list_frame = tk.Frame(left_frame)
@@ -2962,15 +2995,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         frame_suffix.pack(fill=tk.X, padx=5, pady=5)
         tk.Entry(frame_suffix, textvariable=self.file_suffix, width=30).pack(side=tk.LEFT, padx=5, pady=5)
         
-        # --- 処理後自動置き換え（チェックボックスは上部の出力先右隣に配置済み） ---
-        frame_replace = ttk.LabelFrame(parent, text="処理後自動置き換え（元ファイルの移動先設定）")
-        frame_replace.pack(fill=tk.X, padx=5, pady=5)
-
-        backup_row = tk.Frame(frame_replace)
-        backup_row.pack(fill=tk.X, padx=5, pady=3)
-        tk.Label(backup_row, text="元ファイルの移動先:").pack(side=tk.LEFT)
-        tk.Entry(backup_row, textvariable=self.original_backup_folder, width=40).pack(side=tk.LEFT, padx=5)
-        tk.Button(backup_row, text="参照", command=self.select_backup_folder, width=6).pack(side=tk.LEFT)
+        # 処理後自動置き換えのUIは上部（出力先の右隣）に移動済み
 
     def _is_excluded_name(self, path):
         """パスの末尾コンポーネント名に除外パターンを含む場合 True。"""
@@ -3749,6 +3774,10 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             self._process_folder(inpath, output_dir, pause_callback, check_pause, output_root=(output_root or output_dir))
             return
 
+        # 自動置き換え時は出力先にフォルダ/ファイルを作らずステージングへ書き出す
+        if self.auto_replace_enabled.get():
+            output_dir = self._get_auto_replace_staging_dir()
+
         # 画像ファイルの場合は現在処理中の画像を表示
         ext = os.path.splitext(inpath)[1].lower()
         if ext in [".jpg", ".jpeg", ".png", ".webp", ".tiff", ".gif", ".bmp"]:
@@ -4194,7 +4223,12 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
             # 相対サブフォルダを計算 (folder_name を含めて出力先に元フォルダを再現)
             rel_dir = os.path.dirname(os.path.relpath(archive_path, folder_path_abs))
-            target_output_dir = os.path.join(output_dir, folder_name, rel_dir) if rel_dir else os.path.join(output_dir, folder_name)
+            # 自動置き換え時は出力先（ユーザー指定）に痕跡を残さないようテンポラリへ
+            if self.auto_replace_enabled.get():
+                base_dir = self._get_auto_replace_staging_dir()
+            else:
+                base_dir = output_dir
+            target_output_dir = os.path.join(base_dir, folder_name, rel_dir) if rel_dir else os.path.join(base_dir, folder_name)
             try:
                 os.makedirs(target_output_dir, exist_ok=True)
             except Exception as e:
@@ -4490,6 +4524,15 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             self.log_skip(os.path.basename(target_path), f"圧縮率{reduction:.1f}%（5%未満）")
         self.run_on_ui_thread(self.update_tree_status, target_path, "スキップ(低圧縮率)", f"{reduction:.1f}%")
         return True
+
+    def _get_auto_replace_staging_dir(self):
+        """自動置き換え時の出力ステージングディレクトリ（temp_dir 配下）。"""
+        staging = os.path.join(self.temp_dir, "_auto_replace_staging")
+        try:
+            os.makedirs(staging, exist_ok=True)
+        except Exception:
+            pass
+        return staging
 
     def _cleanup_empty_dirs(self, start_dir, boundary):
         """start_dir から boundary（含まない）まで遡り、空ディレクトリを削除する。"""
