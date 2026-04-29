@@ -559,10 +559,50 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             if messagebox.askokcancel("警告", "処理が実行中です。中止して終了しますか？"):
                 # 処理を中止
                 self.cancel_processing = True
+                self._silent_save_config()
                 # 少し待ってから終了
                 self.after(500, self.destroy)
         else:
+            self._silent_save_config()
             self.destroy()
+
+    def _silent_save_config(self):
+        """終了時などに設定をダイアログなしで保存する。"""
+        try:
+            config = {
+                "output_folder": self.output_folder.get(),
+                "jpeg_quality": self.jpeg_quality.get(),
+                "jpeg_progressive": self.jpeg_progressive.get(),
+                "jpeg_keep_metadata": self.jpeg_keep_metadata.get(),
+                "png_compression_level": self.png_compression_level.get(),
+                "png_keep_metadata": self.png_keep_metadata.get(),
+                "webp_quality": self.webp_quality.get(),
+                "webp_keep_metadata": self.webp_keep_metadata.get(),
+                "tiff_keep_metadata": self.tiff_keep_metadata.get(),
+                "resize_mode": self.resize_mode.get(),
+                "resize_width": self.resize_width.get(),
+                "resize_height": self.resize_height.get(),
+                "skip_if_larger": self.skip_if_larger.get(),
+                "skip_already_processed": self.skip_already_processed.get(),
+                "delete_original": self.delete_original.get(),
+                "delete_original_mode": self.delete_original_mode.get(),
+                "file_suffix": self.file_suffix.get(),
+                "max_workers": self.max_workers.get(),
+                "batch_size": self.batch_size.get(),
+                "temp_dir": self.temp_dir_var.get(),
+                "preview_enabled": self.preview_enabled.get(),
+                "use_test_output": self.use_test_output.get(),
+                "test_output_folder": self.test_output_folder.get(),
+                "auto_replace_enabled": self.auto_replace_enabled.get(),
+                "original_backup_folder": self.original_backup_folder.get(),
+            }
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            try:
+                self.log_error(f"自動設定保存エラー: {e}")
+            except Exception:
+                pass
 
     def start_log_save_timer(self):
         """定期的にログを保存するタイマーを開始"""
@@ -2825,8 +2865,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
                 
-            # 設定を適用
-            if "output_folder" in config and os.path.exists(config["output_folder"]):
+            # 設定を適用（パスが存在しなくても保存値を維持する）
+            if "output_folder" in config and config["output_folder"]:
                 self.output_folder.set(config["output_folder"])
             else:
                 # 出力フォルダが存在しない場合はデフォルト値を設定
