@@ -503,6 +503,9 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         # --- 新機能：処理後自動置き換えオプション ---
         self.auto_replace_enabled = tk.BooleanVar(value=True)  # ON/OFFフラグ
         self.original_backup_folder = tk.StringVar(value="F:/漫画")   # 元ファイルの移動先フォルダ
+
+        # --- 入力時除外パターン（フォルダ/ファイル名にこれらの文字列を含むものはリストに追加しない） ---
+        self.excluded_name_patterns = ["話巻", "(Toomics)", "(レジンコミックス)", "(TOPTOON)", "(コミックシーモア)"]
         
         # --- 高度な設定タブ（追加） ---
         self.max_workers = tk.IntVar(value=20)  # Ryzen 9 5900X向け最適値
@@ -1109,10 +1112,14 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
 
             if is_folder:
                 ARC_EXTS = {".zip", ".cbz", ".rar"}
-                for root, _, files in os.walk(path):
+                for root, dirs, files in os.walk(path):
+                    # 除外パターンに一致するサブフォルダは降りない
+                    dirs[:] = [d for d in dirs if not any(pat and pat in d for pat in self.excluded_name_patterns)]
                     for f in files:
                         if os.path.splitext(f)[1].lower() in ARC_EXTS:
                             full = os.path.join(root, f)
+                            if self._is_excluded_path(full, base=path):
+                                continue
                             rel = os.path.relpath(full, path)
                             child_iid = self.file_tree.insert(iid, "end", text=rel, values=("待機", ""))
                             self._tree_item_by_path[full] = child_iid
@@ -2925,6 +2932,30 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         tk.Entry(backup_row, textvariable=self.original_backup_folder, width=40).pack(side=tk.LEFT, padx=5)
         tk.Button(backup_row, text="参照", command=self.select_backup_folder, width=6).pack(side=tk.LEFT)
 
+    def _is_excluded_name(self, path):
+        """パスの末尾コンポーネント名に除外パターンを含む場合 True。"""
+        name = os.path.basename(path.rstrip("/\\"))
+        for pat in self.excluded_name_patterns:
+            if pat and pat in name:
+                return True
+        return False
+
+    def _is_excluded_path(self, path, base=None):
+        """パス全体（base からの相対パスの各コンポーネント）を除外パターンで判定。"""
+        if base:
+            try:
+                rel = os.path.relpath(os.path.abspath(path), os.path.abspath(base))
+            except ValueError:
+                rel = os.path.basename(path)
+            parts = rel.replace("\\", "/").split("/")
+        else:
+            parts = [os.path.basename(path.rstrip("/\\"))]
+        for part in parts:
+            for pat in self.excluded_name_patterns:
+                if pat and pat in part:
+                    return True
+        return False
+
     # ドラッグ＆ドロップイベント
     def on_drop_files(self, event):
         if self.processing:
@@ -2932,12 +2963,19 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         
         paths = self.tk.splitlist(event.data)
         added = 0
+        excluded = 0
         for p in paths:
             p = p.strip("{}")  # Windowsではパスが{}で囲まれる場合がある
             # ファイルの存在確認
             if not os.path.exists(p):
                 continue
-                
+
+            # 除外パターン
+            if self._is_excluded_name(p):
+                self.log(f"除外パターン一致のためスキップ: {os.path.basename(p)}")
+                excluded += 1
+                continue
+
             # フォルダの場合はフォルダ自体を1エントリとして追加（書籍フォルダとして処理）
             if os.path.isdir(p):
                 if p not in self.input_files:
@@ -2970,7 +3008,12 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         )
         if files:
             added = 0
+            excluded = 0
             for f in files:
+                if self._is_excluded_name(f):
+                    self.log(f"除外パターン一致のためスキップ: {os.path.basename(f)}")
+                    excluded += 1
+                    continue
                 if f not in self.input_files:
                     self.input_files.append(f)
                     self._tree_add_top(f, is_folder=False)
@@ -2986,6 +3029,9 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             return
         folder = filedialog.askdirectory(title="書籍フォルダを選択")
         if folder and folder not in self.input_files:
+            if self._is_excluded_name(folder):
+                self.log(f"除外パターン一致のためスキップ: {os.path.basename(folder)}")
+                return
             self.input_files.append(folder)
             self._tree_add_top(folder, is_folder=True)
             self.log(f"フォルダを追加: {folder}")
@@ -4070,10 +4116,15 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".gif", ".bmp"}
         ARC_EXTS = {".zip", ".cbz", ".rar"}
         for root, dirs, files in os.walk(folder_path):
+            # 除外パターンに一致するサブフォルダは降りない
+            dirs[:] = [d for d in dirs if not any(pat and pat in d for pat in self.excluded_name_patterns)]
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
+                full = os.path.join(root, f)
+                if self._is_excluded_path(full, base=folder_path):
+                    continue
                 if ext in ARC_EXTS:
-                    archives.append(os.path.join(root, f))
+                    archives.append(full)
                 elif ext in IMG_EXTS:
                     has_loose_images = True
 
