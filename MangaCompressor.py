@@ -1452,6 +1452,22 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         frame_temp.pack(fill=tk.X, padx=5, pady=5)
         tk.Entry(frame_temp, textvariable=self.temp_dir_var, width=50).pack(side=tk.LEFT, padx=5, pady=5, fill=tk.X, expand=True)
         tk.Button(frame_temp, text=LANG["browse"], command=self.select_temp_dir).pack(side=tk.LEFT, padx=5, pady=5)
+        tk.Button(frame_temp, text="中身をクリア", command=self.clear_temp_dir,
+                  bg="#ffe0e0").pack(side=tk.LEFT, padx=5, pady=5)
+
+        # メンテナンス: 元ファイル移動先のクリア
+        frame_maint = ttk.LabelFrame(parent, text="メンテナンス")
+        frame_maint.pack(fill=tk.X, padx=5, pady=5)
+        tk.Label(frame_maint,
+                 text="一時フォルダや元ファイル移動先を空にしたいときに使用します。"
+                      "\n※処理中は実行できません。"
+                 ).pack(anchor="w", padx=5, pady=(5, 0))
+        btn_row = tk.Frame(frame_maint)
+        btn_row.pack(anchor="w", padx=5, pady=5)
+        tk.Button(btn_row, text="一時フォルダの中身を削除",
+                  command=self.clear_temp_dir, bg="#ffe0e0").pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_row, text="元ファイル移動先の中身を削除",
+                  command=self.clear_backup_folder, bg="#ffe0e0").pack(side=tk.LEFT, padx=2)
 
         # テスト出力設定フレーム（新規追加）
         frame_test_output = ttk.LabelFrame(parent, text=LANG["test_output_settings"])
@@ -1467,6 +1483,54 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         tk.Label(test_folder_frame, text=LANG["test_output_folder"]).pack(side=tk.LEFT)
         tk.Entry(test_folder_frame, textvariable=self.test_output_folder, width=40).pack(side=tk.LEFT, padx=5)
         tk.Button(test_folder_frame, text=LANG["browse"], command=self.select_test_output_folder).pack(side=tk.LEFT)
+
+    def _clear_directory_contents(self, target_dir, label):
+        """target_dir の中身（直下ファイル・サブフォルダ）を削除する。target_dir 自体は残す。"""
+        if self.processing:
+            messagebox.showwarning(label, "処理中は実行できません。完了/中止後に再度お試しください。")
+            return False
+        if not target_dir:
+            messagebox.showwarning(label, "対象フォルダが設定されていません。")
+            return False
+        if not os.path.isdir(target_dir):
+            messagebox.showwarning(label, f"フォルダが見つかりません:\n{target_dir}")
+            return False
+        if not messagebox.askyesno(label,
+                                   f"以下のフォルダの中身をすべて削除します。よろしいですか？\n\n{target_dir}"):
+            return False
+        errors = []
+        removed = 0
+        try:
+            for entry in os.listdir(target_dir):
+                p = os.path.join(target_dir, entry)
+                try:
+                    if os.path.isdir(p) and not os.path.islink(p):
+                        shutil.rmtree(p)
+                    else:
+                        os.remove(p)
+                    removed += 1
+                except Exception as e:
+                    errors.append(f"{entry}: {e}")
+        except Exception as e:
+            errors.append(str(e))
+        msg = f"{removed}件削除しました。"
+        if errors:
+            msg += f"\n\n削除できなかった項目:\n" + "\n".join(errors[:10])
+            if len(errors) > 10:
+                msg += f"\n…他 {len(errors) - 10} 件"
+            messagebox.showwarning(label, msg)
+        else:
+            messagebox.showinfo(label, msg)
+        self.log(f"[{label}] {target_dir} の中身を {removed} 件削除（エラー {len(errors)} 件）")
+        return True
+
+    def clear_temp_dir(self):
+        """一時ディレクトリの中身を削除する。"""
+        self._clear_directory_contents(self.temp_dir_var.get() or self.temp_dir, "一時フォルダのクリア")
+
+    def clear_backup_folder(self):
+        """元ファイル移動先の中身を削除する。"""
+        self._clear_directory_contents(self.original_backup_folder.get(), "元ファイル移動先のクリア")
 
     def select_temp_dir(self):
         """一時ディレクトリを選択"""
@@ -4553,8 +4617,14 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         except Exception:
             pass
 
-    def _move_with_retry(self, src, dst, retries=3, delay=1.0):
-        """shutil.move をリトライ付きで実行（ファイルロック等の一時的失敗を回避）。"""
+    def _move_with_retry(self, src, dst, retries=4, delay=1.0):
+        """shutil.move をリトライ付きで実行（ファイルロック等の一時的失敗を回避）。
+
+        shutil.move はクロスデバイス時に copy→unlink にフォールバックするが、
+        unlink が PermissionError(Errno 13) で失敗するとコピー済みなのに例外が
+        伝播しソース側が残るケースがある。その場合は explicit に unlink を
+        リトライしてからエラー扱いにする。
+        """
         last_exc = None
         for attempt in range(retries):
             try:
@@ -4562,6 +4632,18 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 return True
             except (OSError, PermissionError) as e:
                 last_exc = e
+                # コピー済み + ソース残存 = 部分移動。ソースを別途削除して回復
+                if os.path.exists(dst) and os.path.exists(src):
+                    for u_attempt in range(retries):
+                        try:
+                            os.remove(src)
+                            self.log(f"部分移動を回復（コピー成功・ソース手動削除）: {src}")
+                            return True
+                        except (OSError, PermissionError) as ue:
+                            last_exc = ue
+                            time.sleep(delay * (u_attempt + 1))
+                    # ソース削除も全失敗 → 諦めて例外
+                    break
                 if attempt < retries - 1:
                     time.sleep(delay * (attempt + 1))
         if last_exc:
@@ -4637,14 +4719,20 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 while os.path.exists(os.path.join(target_dir, f"{base}_{counter}{ext}")):
                     counter += 1
                 dest_backup = os.path.join(target_dir, f"{base}_{counter}{ext}")
-            self._move_with_retry(inpath, dest_backup)
+            try:
+                self._move_with_retry(inpath, dest_backup)
+            except Exception as e:
+                raise type(e)(f"[ステップ1: 元ファイル→バックアップ] {inpath} → {dest_backup}: {e}") from e
             self.log(f"元ファイルを移動: {inpath} → {dest_backup}")
 
             # ステップ2: 出力ファイルを元の場所に配置（リトライ付き）
             if os.path.abspath(out_path) != os.path.abspath(dest_file):
                 if os.path.exists(dest_file):
                     os.remove(dest_file)
-                self._move_with_retry(out_path, dest_file)
+                try:
+                    self._move_with_retry(out_path, dest_file)
+                except Exception as e:
+                    raise type(e)(f"[ステップ2: 出力→元の場所] {out_path} → {dest_file}: {e}") from e
             self.log(f"元の場所に配置: {dest_file}")
 
             # 親フォルダの日時を復元（書籍管理アプリの更新日時順を維持）
