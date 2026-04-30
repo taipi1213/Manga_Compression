@@ -61,7 +61,8 @@ import send2trash  # ゴミ箱機能用
 def compress_image_worker(src_path, dst_folder, jpeg_quality, jpeg_progressive, jpeg_keep_metadata,
                          png_compression_level, png_keep_metadata, webp_quality, webp_keep_metadata,
                          tiff_keep_metadata, resize_mode, resize_width, resize_height, resize_modes,
-                         skip_if_larger, file_suffix, temp_files=None, pause_callback=None, base_folder=None):
+                         skip_if_larger, file_suffix, temp_files=None, pause_callback=None, base_folder=None,
+                         png_zopfli=False):
     try:
         dst_dir = dst_folder
         if base_folder:
@@ -109,35 +110,45 @@ def compress_image_worker(src_path, dst_folder, jpeg_quality, jpeg_progressive, 
             while pause_callback():
                 time.sleep(0.1)  # 一時停止中は待機
 
-        # コマンド組み立て
+        # コマンド組み立て（Caesium CLT 1.3.0+ 仕様）
+        # 共通フラグ: --threads 1（Python側でThreadPool並列のためCaesium内並列OFF）
+        #            --keep-dates（更新日時を保持）
+        #            --quiet（-Q, ログノイズ抑制）
+        # 注意: 1.3.0で --exif-tool=delete は廃止 → デフォルトで削除、保持したいときに -e
+        #       --progressive は廃止（プログレッシブがデフォルト）→ ベースライン化したいとき --jpeg-baseline
+        common = ["--threads", "1", "--keep-dates", "--quiet"]
         if ext in [".jpg", ".jpeg"]:
-            cmd = ["caesiumclt"]
-            if not jpeg_keep_metadata:
-                cmd.append("--exif-tool=delete")
-            if jpeg_progressive:
-                cmd.append("--progressive")
+            cmd = ["caesiumclt"] + common
+            if jpeg_keep_metadata:
+                cmd.append("-e")
+            if not jpeg_progressive:
+                cmd.append("--jpeg-baseline")
             cmd.extend(["--quality", str(jpeg_quality)])
         elif ext == ".webp":
-            cmd = ["caesiumclt"]
-            if not webp_keep_metadata:
-                cmd.append("--exif-tool=delete")
+            cmd = ["caesiumclt"] + common
+            if webp_keep_metadata:
+                cmd.append("-e")
             cmd.extend(["--quality", str(webp_quality)])
         elif ext == ".png":
-            cmd = ["caesiumclt"]
-            if not png_keep_metadata:
-                cmd.append("--exif-tool=delete")
+            cmd = ["caesiumclt"] + common
+            if png_keep_metadata:
+                cmd.append("-e")
             cmd.extend(["--lossless", "--png-opt-level", str(png_compression_level)])
+            if png_zopfli:
+                cmd.append("--zopfli")
         elif ext == ".tiff":
-            cmd = ["caesiumclt"]
-            if not tiff_keep_metadata:
-                cmd.append("--exif-tool=delete")
+            cmd = ["caesiumclt"] + common
+            if tiff_keep_metadata:
+                cmd.append("-e")
             cmd.append("--lossless")
         elif ext in [".gif", ".bmp"]:
             # GIFとBMPはPNGに変換して保存
-            cmd = ["caesiumclt"]
-            if not png_keep_metadata:
-                cmd.append("--exif-tool=delete")
+            cmd = ["caesiumclt"] + common
+            if png_keep_metadata:
+                cmd.append("-e")
             cmd.extend(["--lossless", "--png-opt-level", str(png_compression_level), "--format", "png"])
+            if png_zopfli:
+                cmd.append("--zopfli")
         else:
             return (src_path, None, f"未対応の形式: {ext}")
 
@@ -480,6 +491,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         # PNG
         self.png_compression_level = tk.IntVar(value=3)
         self.png_keep_metadata = tk.BooleanVar(value=True)
+        self.png_zopfli = tk.BooleanVar(value=False)  # Caesium 1.3.0+: PNG/WebPの追加圧縮（遅いが小さい）
         # WebP
         self.webp_quality = tk.IntVar(value=80)
         self.webp_keep_metadata = tk.BooleanVar(value=True)
@@ -575,6 +587,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 "jpeg_progressive": self.jpeg_progressive.get(),
                 "jpeg_keep_metadata": self.jpeg_keep_metadata.get(),
                 "png_compression_level": self.png_compression_level.get(),
+            "png_zopfli": self.png_zopfli.get(),
                 "png_keep_metadata": self.png_keep_metadata.get(),
                 "webp_quality": self.webp_quality.get(),
                 "webp_keep_metadata": self.webp_keep_metadata.get(),
@@ -727,6 +740,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             "jpeg_progressive": self.jpeg_progressive.get(),
             "jpeg_keep_metadata": self.jpeg_keep_metadata.get(),
             "png_compression_level": self.png_compression_level.get(),
+            "png_zopfli": self.png_zopfli.get(),
             "png_keep_metadata": self.png_keep_metadata.get(),
             "webp_quality": self.webp_quality.get(),
             "webp_keep_metadata": self.webp_keep_metadata.get(),
@@ -840,6 +854,8 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         tk.Label(frame_png, text=LANG["compression_level"]).grid(row=0, column=0, sticky="e", padx=5, pady=5)
         tk.Scale(frame_png, from_=0, to=9, orient=tk.HORIZONTAL, variable=self.png_compression_level).grid(row=0, column=1, sticky="we", padx=5, pady=5)
         tk.Checkbutton(frame_png, text=LANG["keep_metadata"], variable=self.png_keep_metadata).grid(row=1, column=0, columnspan=2, sticky="w", padx=5)
+        tk.Checkbutton(frame_png, text="Zopfli圧縮を使う（更に小さくなるが大幅に遅い・Caesium 1.3.0+）",
+                       variable=self.png_zopfli).grid(row=2, column=0, columnspan=2, sticky="w", padx=5)
 
         # WebP設定
         frame_webp = ttk.LabelFrame(parent, text="WebP")
@@ -1878,6 +1894,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                         'jpeg_progressive': self.jpeg_progressive.get(),
                         'jpeg_keep_metadata': self.jpeg_keep_metadata.get(),
                         'png_compression_level': self.png_compression_level.get(),
+                        'png_zopfli': self.png_zopfli.get(),
                         'png_keep_metadata': self.png_keep_metadata.get(),
                         'webp_quality': self.webp_quality.get(),
                         'webp_keep_metadata': self.webp_keep_metadata.get(),
@@ -2063,6 +2080,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                     'jpeg_progressive': self.jpeg_progressive.get(),
                     'jpeg_keep_metadata': self.jpeg_keep_metadata.get(),
                     'png_compression_level': self.png_compression_level.get(),
+                        'png_zopfli': self.png_zopfli.get(),
                     'png_keep_metadata': self.png_keep_metadata.get(),
                     'webp_quality': self.webp_quality.get(),
                     'webp_keep_metadata': self.webp_keep_metadata.get(),
@@ -2912,6 +2930,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             "jpeg_progressive": self.jpeg_progressive.get(),
             "jpeg_keep_metadata": self.jpeg_keep_metadata.get(),
             "png_compression_level": self.png_compression_level.get(),
+            "png_zopfli": self.png_zopfli.get(),
             "png_keep_metadata": self.png_keep_metadata.get(),
             "webp_quality": self.webp_quality.get(),
             "webp_keep_metadata": self.webp_keep_metadata.get(),
@@ -2978,6 +2997,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             self.jpeg_progressive.set(config.get("jpeg_progressive", False))
             self.jpeg_keep_metadata.set(config.get("jpeg_keep_metadata", True))
             self.png_compression_level.set(config.get("png_compression_level", 3))
+            self.png_zopfli.set(config.get("png_zopfli", False))
             self.png_keep_metadata.set(config.get("png_keep_metadata", True))
             self.webp_quality.set(config.get("webp_quality", 80))
             self.webp_keep_metadata.set(config.get("webp_keep_metadata", True))
@@ -3433,6 +3453,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                     "jpeg_quality": self.jpeg_quality.get(),
                     "jpeg_progressive": self.jpeg_progressive.get(),
                     "png_compression_level": self.png_compression_level.get(),
+            "png_zopfli": self.png_zopfli.get(),
                     "resize_mode": self.resize_mode.get(),
                     "resize_width": self.resize_width.get(),
                     "resize_height": self.resize_height.get(),
@@ -3541,6 +3562,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                         'jpeg_progressive': self.jpeg_progressive.get(),
                         'jpeg_keep_metadata': self.jpeg_keep_metadata.get(),
                         'png_compression_level': self.png_compression_level.get(),
+                        'png_zopfli': self.png_zopfli.get(),
                         'png_keep_metadata': self.png_keep_metadata.get(),
                         'webp_quality': self.webp_quality.get(),
                         'webp_keep_metadata': self.webp_keep_metadata.get(),
@@ -3975,6 +3997,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                         'jpeg_progressive': self.jpeg_progressive.get(),
                         'jpeg_keep_metadata': self.jpeg_keep_metadata.get(),
                         'png_compression_level': self.png_compression_level.get(),
+                        'png_zopfli': self.png_zopfli.get(),
                         'png_keep_metadata': self.png_keep_metadata.get(),
                         'webp_quality': self.webp_quality.get(),
                         'webp_keep_metadata': self.webp_keep_metadata.get(),
@@ -4141,6 +4164,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 'jpeg_progressive': self.jpeg_progressive.get(),
                 'jpeg_keep_metadata': self.jpeg_keep_metadata.get(),
                 'png_compression_level': self.png_compression_level.get(),
+                        'png_zopfli': self.png_zopfli.get(),
                 'png_keep_metadata': self.png_keep_metadata.get(),
                 'webp_quality': self.webp_quality.get(),
                 'webp_keep_metadata': self.webp_keep_metadata.get(),
@@ -5108,6 +5132,7 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
             "jpeg_progressive": self.jpeg_progressive.get(),
             "jpeg_keep_metadata": self.jpeg_keep_metadata.get(),
             "png_compression_level": self.png_compression_level.get(),
+            "png_zopfli": self.png_zopfli.get(),
             "png_keep_metadata": self.png_keep_metadata.get(),
             "webp_quality": self.webp_quality.get(),
             "webp_keep_metadata": self.webp_keep_metadata.get(),
