@@ -1,4 +1,5 @@
 import os
+import stat
 import zipfile
 import shutil
 import subprocess
@@ -26,6 +27,16 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     filename='caesium_gui.log')
 logger = logging.getLogger('CaesiumGUI')
+
+
+def _force_remove_readonly(func, path, exc_info):
+    """shutil.rmtree の onerror ハンドラ。Windows で読み取り専用属性により
+    削除に失敗するファイル/フォルダの属性を解除して再試行する。"""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass
 
 # 依存関係のチェック
 DEPENDENCIES = {
@@ -572,10 +583,20 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 # 処理を中止
                 self.cancel_processing = True
                 self._silent_save_config()
-                # 少し待ってから終了
-                self.after(500, self.destroy)
+                # 少し待ってから終了（一時ファイルもクリア）
+                def _finalize():
+                    try:
+                        self.cleanup_temp_dir()
+                    except Exception:
+                        pass
+                    self.destroy()
+                self.after(500, _finalize)
         else:
             self._silent_save_config()
+            try:
+                self.cleanup_temp_dir()
+            except Exception:
+                pass
             self.destroy()
 
     def _silent_save_config(self):
@@ -1121,9 +1142,17 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         log_frame = tk.Frame(log_frames)
         log_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2))
         
-        log_label = tk.Label(log_frame, text="処理ログ")
-        log_label.pack(anchor="w")
-        
+        log_header = tk.Frame(log_frame)
+        log_header.pack(fill=tk.X)
+        tk.Label(log_header, text="処理ログ").pack(side=tk.LEFT, anchor="w")
+        tk.Button(
+            log_header,
+            text="クリア",
+            command=self.clear_log,
+            width=6,
+            font=("", 8)
+        ).pack(side=tk.RIGHT, padx=2)
+
         log_scrollbar = tk.Scrollbar(log_frame)
         log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
@@ -1146,13 +1175,21 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         
         # v2: CSV出力ボタン
         self.csv_export_button = tk.Button(
-            error_header, 
-            text="CSV出力", 
+            error_header,
+            text="CSV出力",
             command=self.export_error_log_csv,
             width=8,
             font=("", 8)
         )
         self.csv_export_button.pack(side=tk.RIGHT, padx=2)
+
+        tk.Button(
+            error_header,
+            text="クリア",
+            command=self.clear_error_log,
+            width=6,
+            font=("", 8)
+        ).pack(side=tk.RIGHT, padx=2)
         
         error_scrollbar = tk.Scrollbar(error_frame)
         error_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1521,9 +1558,16 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
                 p = os.path.join(target_dir, entry)
                 try:
                     if os.path.isdir(p) and not os.path.islink(p):
-                        shutil.rmtree(p)
+                        shutil.rmtree(p, onerror=_force_remove_readonly)
+                        if os.path.exists(p):
+                            raise OSError("フォルダの削除に失敗しました（使用中の可能性）")
                     else:
-                        os.remove(p)
+                        try:
+                            os.remove(p)
+                        except PermissionError:
+                            # 読み取り専用属性を解除して再試行
+                            os.chmod(p, stat.S_IWRITE)
+                            os.remove(p)
                     removed += 1
                 except Exception as e:
                     errors.append(f"{entry}: {e}")
@@ -4831,12 +4875,36 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         self.temp_files.clear()
     
     def cleanup_temp_dir(self):
-        """アプリケーション終了時に一時ディレクトリを削除"""
+        """アプリケーション終了時に一時ディレクトリを削除/中身をクリア"""
+        # 1. 現在使用中の一時ディレクトリは中身だけ削除（ユーザー指定を含む）
+        try:
+            cur = None
+            try:
+                cur = self.temp_dir_var.get()
+            except Exception:
+                cur = getattr(self, "temp_dir", None)
+            if cur and os.path.isdir(cur):
+                for entry in os.listdir(cur):
+                    p = os.path.join(cur, entry)
+                    try:
+                        if os.path.isdir(p) and not os.path.islink(p):
+                            shutil.rmtree(p, onerror=_force_remove_readonly)
+                        else:
+                            try:
+                                os.remove(p)
+                            except PermissionError:
+                                os.chmod(p, stat.S_IWRITE)
+                                os.remove(p)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # 2. 自動生成した一時ディレクトリ自体も削除
         try:
             temp_paths = getattr(self, "_managed_temp_dirs", set())
             for temp_path in list(temp_paths):
                 if os.path.exists(temp_path):
-                    shutil.rmtree(temp_path)
+                    shutil.rmtree(temp_path, onerror=_force_remove_readonly)
                 temp_paths.discard(temp_path)
         except Exception:
             pass
@@ -4983,6 +5051,24 @@ class CaesiumCLTGUI(TkinterDnD.Tk):
         else:
             self.log_text.insert(tk.END, f"[{current_time}] {message}\n")
         self.log_text.see(tk.END)
+
+    def clear_log(self):
+        """処理ログのテキストエリアをクリア"""
+        try:
+            self.log_text.delete("1.0", tk.END)
+        except Exception:
+            pass
+
+    def clear_error_log(self):
+        """エラー・スキップログのテキストエリアと記録済みデータをクリア"""
+        try:
+            self.error_log_text.delete("1.0", tk.END)
+        except Exception:
+            pass
+        try:
+            self.error_log_data.clear()
+        except Exception:
+            pass
 
     def _log_error_internal(self, message, is_skip=False):
         """エラーログ専用のテキストエリアにエラーやスキップ情報を出力"""
